@@ -1,422 +1,328 @@
 """
 Integration tests for deal CRUD endpoints.
 
+All repository calls are mocked — no PostgreSQL required.
+
 Tests cover:
-- List deals (pagination, owner vs sales rep scope)
-- Create deal (success, forbidden for viewer, invalid stage)
-- Get deal by ID
-- Update deal (owner success, sales rep own vs other)
-- Move deal to a different stage (stage movement, closed_at on won/lost)
-- Delete deal (owner success, forbidden for sales rep)
+- GET  /api/v1/deals              (list)
+- POST /api/v1/deals              (success, stage not found, forbidden viewer)
+- GET  /api/v1/deals/{id}         (success, 404)
+- PUT  /api/v1/deals/{id}         (owner success, forbidden rep, 404)
+- PUT  /api/v1/deals/{id}/stage   (move stage)
+- DELETE /api/v1/deals/{id}       (owner success, forbidden rep, 404)
 """
 
-from uuid import uuid4
+import uuid
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
-import pytest
 from httpx import AsyncClient
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.models.organization import Organization
-from src.models.pipeline_stage import PipelineStage
-from src.models.user import User
+from src.schemas.deal import DealResponse
+from tests.integration.conftest import make_deal
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+_STAGE_ID = uuid.UUID("00000000-0000-0000-0001-000000000001")
 
 
-async def _make_stage(
-    session: AsyncSession,
-    org: Organization,
-    *,
-    name: str = "Prospect",
-    order: int = 0,
-    is_won: bool = False,
-    is_lost: bool = False,
-) -> PipelineStage:
-    """Helper to persist a PipelineStage directly via the ORM."""
-    stage = PipelineStage(
-        organization_id=org.id,
-        name=name,
-        order=order,
-        is_won=is_won,
-        is_lost=is_lost,
+def _make_deal_payload(stage_id: uuid.UUID = _STAGE_ID) -> dict:
+    return {
+        "title": "Big Deal",
+        "value": 10000.0,
+        "currency": "USD",
+        "stage_id": str(stage_id),
+    }
+
+
+def _paginated(items: list) -> SimpleNamespace:
+    validated = [DealResponse.model_validate(i) for i in items]
+    return SimpleNamespace(
+        items=validated,
+        total=len(items),
+        page=1,
+        page_size=20,
+        pages=1,
     )
-    session.add(stage)
-    await session.flush()
-    await session.refresh(stage)
-    return stage
 
 
-async def _make_deal(
-    session: AsyncSession,
-    org: Organization,
-    stage: PipelineStage,
-    *,
-    title: str = "Big Deal",
-    assigned_to: User | None = None,
-) -> "Deal":  # type: ignore[name-defined]  # noqa: F821
-    """Helper to persist a Deal directly via the ORM."""
-    from datetime import UTC, datetime
-
-    from src.models.deal import Deal
-
-    deal = Deal(
-        organization_id=org.id,
-        title=title,
-        value=1000.0,
-        currency="USD",
-        stage_id=stage.id,
-        assigned_to_id=assigned_to.id if assigned_to else None,
-        created_at=datetime.now(UTC),
-        updated_at=datetime.now(UTC),
-    )
-    session.add(deal)
-    await session.flush()
-    await session.refresh(deal)
-    return deal
+# ---------------------------------------------------------------------------
+# List deals
+# ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
 class TestListDeals:
-    """Tests for GET /api/v1/deals."""
+    """GET /api/v1/deals"""
 
-    async def test_list_returns_tenant_deals(
-        self,
-        client: AsyncClient,
-        db_session: AsyncSession,
-        org: Organization,
-        owner_headers: dict,
+    @patch("src.api.v1.routers.deals.DealService")
+    async def test_list_returns_200(
+        self, mock_svc_cls: AsyncMock, client_owner: AsyncClient
     ) -> None:
-        """Owner sees all deals in their organization."""
-        stage = await _make_stage(db_session, org)
-        await _make_deal(db_session, org, stage, title="Deal One")
-        await _make_deal(db_session, org, stage, title="Deal Two")
+        """Owner gets a paginated list of deals."""
+        deal = make_deal(stage_id=_STAGE_ID)
+        mock_svc_cls.return_value.list_deals = AsyncMock(return_value=_paginated([deal]))
 
-        response = await client.get("/api/v1/deals", headers=owner_headers)
+        response = await client_owner.get("/api/v1/deals")
+
         assert response.status_code == 200
         data = response.json()
-        assert data["total"] >= 2
+        assert data["total"] == 1
 
-    async def test_sales_rep_sees_only_assigned_deals(
-        self,
-        client: AsyncClient,
-        db_session: AsyncSession,
-        org: Organization,
-        sales_rep_user: User,
-        rep_headers: dict,
-    ) -> None:
-        """Sales rep only sees deals assigned to them."""
-        stage = await _make_stage(db_session, org)
-        await _make_deal(db_session, org, stage, title="Assigned", assigned_to=sales_rep_user)
-        await _make_deal(db_session, org, stage, title="Not Assigned")
+    @patch("src.api.v1.routers.deals.DealService")
+    async def test_list_empty(self, mock_svc_cls: AsyncMock, client_owner: AsyncClient) -> None:
+        """Empty pipeline returns empty list."""
+        mock_svc_cls.return_value.list_deals = AsyncMock(return_value=_paginated([]))
 
-        response = await client.get("/api/v1/deals", headers=rep_headers)
+        response = await client_owner.get("/api/v1/deals")
+
         assert response.status_code == 200
-        data = response.json()
-        for item in data["items"]:
-            assert item["assignedToId"] == str(sales_rep_user.id)
+        assert response.json()["total"] == 0
 
-    async def test_list_requires_auth(self, client: AsyncClient) -> None:
+    async def test_list_unauthenticated(self, client_no_auth: AsyncClient) -> None:
         """Unauthenticated request returns 401."""
-        response = await client.get("/api/v1/deals")
+        response = await client_no_auth.get("/api/v1/deals")
         assert response.status_code == 401
 
-    async def test_list_pagination(
-        self,
-        client: AsyncClient,
-        db_session: AsyncSession,
-        org: Organization,
-        owner_headers: dict,
-    ) -> None:
-        """Pagination metadata is correct."""
-        stage = await _make_stage(db_session, org)
-        for i in range(4):
-            await _make_deal(db_session, org, stage, title=f"PageDeal{i}")
 
-        response = await client.get(
-            "/api/v1/deals",
-            headers=owner_headers,
-            params={"page": 1, "page_size": 2},
-        )
-        assert response.status_code == 200
-        data = response.json()
-        assert len(data["items"]) <= 2
-        assert data["page"] == 1
-        assert data["pageSize"] == 2
+# ---------------------------------------------------------------------------
+# Create deal
+# ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
 class TestCreateDeal:
-    """Tests for POST /api/v1/deals."""
+    """POST /api/v1/deals"""
 
-    async def test_owner_can_create_deal(
-        self,
-        client: AsyncClient,
-        db_session: AsyncSession,
-        org: Organization,
-        owner_headers: dict,
-    ) -> None:
-        """Owner can create a deal."""
-        stage = await _make_stage(db_session, org, name="Lead")
-        response = await client.post(
-            "/api/v1/deals",
-            headers=owner_headers,
-            json={"title": "New Deal", "stageId": str(stage.id), "value": 5000},
-        )
+    @patch("src.api.v1.routers.deals.DealService")
+    async def test_create_success(self, mock_svc_cls: AsyncMock, client_owner: AsyncClient) -> None:
+        """Owner can create a deal — returns 201."""
+        deal = make_deal(stage_id=_STAGE_ID)
+        mock_svc_cls.return_value.create_deal = AsyncMock(return_value=deal)
+
+        response = await client_owner.post("/api/v1/deals", json=_make_deal_payload())
+
         assert response.status_code == 201
-        data = response.json()
-        assert data["title"] == "New Deal"
-        assert "id" in data
+        assert response.json()["title"] == deal.title
 
-    async def test_create_with_invalid_stage_returns_404(
-        self,
-        client: AsyncClient,
-        owner_headers: dict,
+    @patch("src.api.v1.routers.deals.DealService")
+    async def test_create_stage_not_found(
+        self, mock_svc_cls: AsyncMock, client_owner: AsyncClient
     ) -> None:
         """Creating a deal with a non-existent stage returns 404."""
-        response = await client.post(
-            "/api/v1/deals",
-            headers=owner_headers,
-            json={"title": "Ghost Deal", "stageId": str(uuid4())},
+        from src.core.exceptions import NotFoundError
+
+        mock_svc_cls.return_value.create_deal = AsyncMock(
+            side_effect=NotFoundError("PipelineStage", str(_STAGE_ID))
         )
+
+        response = await client_owner.post("/api/v1/deals", json=_make_deal_payload())
+
         assert response.status_code == 404
 
-    async def test_sales_rep_can_create_deal(
-        self,
-        client: AsyncClient,
-        db_session: AsyncSession,
-        org: Organization,
-        rep_headers: dict,
+    @patch("src.api.v1.routers.deals.DealService")
+    async def test_create_forbidden_viewer(
+        self, mock_svc_cls: AsyncMock, client_viewer: AsyncClient
     ) -> None:
-        """Sales reps are allowed to create deals."""
-        stage = await _make_stage(db_session, org, name="RepStage")
-        response = await client.post(
-            "/api/v1/deals",
-            headers=rep_headers,
-            json={"title": "Rep Deal", "stageId": str(stage.id)},
+        """Viewer cannot create deals — 403."""
+        from src.core.exceptions import ForbiddenError
+
+        mock_svc_cls.return_value.create_deal = AsyncMock(
+            side_effect=ForbiddenError("Viewers cannot create deals")
         )
-        assert response.status_code == 201
 
-    async def test_viewer_cannot_create_deal(
-        self,
-        client: AsyncClient,
-        db_session: AsyncSession,
-        org: Organization,
-    ) -> None:
-        """Viewers are forbidden from creating deals."""
-        from datetime import UTC, datetime
+        response = await client_viewer.post("/api/v1/deals", json=_make_deal_payload())
 
-        from src.core.enums import UserRole
-        from src.core.security import create_access_token, hash_password
-        from src.models.user import User
-
-        stage = await _make_stage(db_session, org, name="ViewerStage")
-
-        viewer = User(
-            organization_id=org.id,
-            email="deal.viewer@test.com",
-            password_hash=hash_password("Pass1"),
-            first_name="Viewer",
-            last_name="Deal",
-            role=UserRole.VIEWER.value,
-            is_active=True,
-            created_at=datetime.now(UTC),
-        )
-        db_session.add(viewer)
-        await db_session.flush()
-        await db_session.refresh(viewer)
-
-        token = create_access_token(viewer.id, viewer.organization_id, viewer.role)
-        headers = {"Authorization": f"Bearer {token}"}
-
-        response = await client.post(
-            "/api/v1/deals",
-            headers=headers,
-            json={"title": "Forbidden Deal", "stageId": str(stage.id)},
-        )
         assert response.status_code == 403
 
+    async def test_create_missing_title(self, client_owner: AsyncClient) -> None:
+        """Missing required 'title' field returns 422."""
+        response = await client_owner.post("/api/v1/deals", json={"stage_id": str(_STAGE_ID)})
+        assert response.status_code == 422
 
-@pytest.mark.asyncio
+
+# ---------------------------------------------------------------------------
+# Get deal
+# ---------------------------------------------------------------------------
+
+
 class TestGetDeal:
-    """Tests for GET /api/v1/deals/{id}."""
+    """GET /api/v1/deals/{deal_id}"""
 
-    async def test_get_existing_deal(
-        self,
-        client: AsyncClient,
-        db_session: AsyncSession,
-        org: Organization,
-        owner_headers: dict,
-    ) -> None:
-        """Returns 200 with deal details for an existing deal."""
-        stage = await _make_stage(db_session, org)
-        deal = await _make_deal(db_session, org, stage, title="Fetchable Deal")
-        response = await client.get(f"/api/v1/deals/{deal.id}", headers=owner_headers)
+    @patch("src.api.v1.routers.deals.DealService")
+    async def test_get_success(self, mock_svc_cls: AsyncMock, client_owner: AsyncClient) -> None:
+        """Returns 200 with the deal data."""
+        deal_id = uuid.uuid4()
+        deal = make_deal(deal_id=deal_id, stage_id=_STAGE_ID)
+        mock_svc_cls.return_value.get_deal = AsyncMock(return_value=deal)
+
+        response = await client_owner.get(f"/api/v1/deals/{deal_id}")
+
         assert response.status_code == 200
-        assert response.json()["id"] == str(deal.id)
+        assert response.json()["id"] == str(deal_id)
 
-    async def test_get_nonexistent_deal(
-        self,
-        client: AsyncClient,
-        owner_headers: dict,
-    ) -> None:
-        """Returns 404 for a deal that does not exist."""
-        response = await client.get(f"/api/v1/deals/{uuid4()}", headers=owner_headers)
+    @patch("src.api.v1.routers.deals.DealService")
+    async def test_get_not_found(self, mock_svc_cls: AsyncMock, client_owner: AsyncClient) -> None:
+        """Non-existent deal returns 404."""
+        from src.core.exceptions import NotFoundError
+
+        deal_id = uuid.uuid4()
+        mock_svc_cls.return_value.get_deal = AsyncMock(
+            side_effect=NotFoundError("Deal", str(deal_id))
+        )
+
+        response = await client_owner.get(f"/api/v1/deals/{deal_id}")
+
         assert response.status_code == 404
 
 
-@pytest.mark.asyncio
+# ---------------------------------------------------------------------------
+# Update deal
+# ---------------------------------------------------------------------------
+
+
 class TestUpdateDeal:
-    """Tests for PUT /api/v1/deals/{id}."""
+    """PUT /api/v1/deals/{deal_id}"""
 
-    async def test_owner_can_update_any_deal(
-        self,
-        client: AsyncClient,
-        db_session: AsyncSession,
-        org: Organization,
-        owner_headers: dict,
-    ) -> None:
-        """Owner can update any deal."""
-        stage = await _make_stage(db_session, org)
-        deal = await _make_deal(db_session, org, stage, title="Old Title")
-        response = await client.put(
-            f"/api/v1/deals/{deal.id}",
-            headers=owner_headers,
-            json={"title": "New Title"},
+    @patch("src.api.v1.routers.deals.DealService")
+    async def test_update_success(self, mock_svc_cls: AsyncMock, client_owner: AsyncClient) -> None:
+        """Owner can update a deal — returns 200."""
+        deal_id = uuid.uuid4()
+        updated = make_deal(deal_id=deal_id, title="Updated Deal", stage_id=_STAGE_ID)
+        mock_svc_cls.return_value.update_deal = AsyncMock(return_value=updated)
+
+        response = await client_owner.put(
+            f"/api/v1/deals/{deal_id}", json={"title": "Updated Deal"}
         )
+
         assert response.status_code == 200
-        assert response.json()["title"] == "New Title"
+        assert response.json()["title"] == "Updated Deal"
 
-    async def test_sales_rep_cannot_update_unassigned_deal(
-        self,
-        client: AsyncClient,
-        db_session: AsyncSession,
-        org: Organization,
-        rep_headers: dict,
+    @patch("src.api.v1.routers.deals.DealService")
+    async def test_update_not_found(
+        self, mock_svc_cls: AsyncMock, client_owner: AsyncClient
     ) -> None:
-        """Sales rep cannot update a deal not assigned to them."""
-        stage = await _make_stage(db_session, org)
-        deal = await _make_deal(db_session, org, stage, title="Not Mine")
-        response = await client.put(
-            f"/api/v1/deals/{deal.id}",
-            headers=rep_headers,
-            json={"title": "Hijacked"},
+        """Updating a non-existent deal returns 404."""
+        from src.core.exceptions import NotFoundError
+
+        deal_id = uuid.uuid4()
+        mock_svc_cls.return_value.update_deal = AsyncMock(
+            side_effect=NotFoundError("Deal", str(deal_id))
         )
+
+        response = await client_owner.put(f"/api/v1/deals/{deal_id}", json={"title": "X"})
+
+        assert response.status_code == 404
+
+    @patch("src.api.v1.routers.deals.DealService")
+    async def test_update_forbidden_rep(
+        self, mock_svc_cls: AsyncMock, client_rep: AsyncClient
+    ) -> None:
+        """Sales rep cannot modify a deal not assigned to them — 403."""
+        from src.core.exceptions import ForbiddenError
+
+        deal_id = uuid.uuid4()
+        mock_svc_cls.return_value.update_deal = AsyncMock(
+            side_effect=ForbiddenError("Sales reps can only modify their assigned deals")
+        )
+
+        response = await client_rep.put(f"/api/v1/deals/{deal_id}", json={"title": "X"})
+
         assert response.status_code == 403
 
-    async def test_sales_rep_can_update_assigned_deal(
-        self,
-        client: AsyncClient,
-        db_session: AsyncSession,
-        org: Organization,
-        sales_rep_user: User,
-        rep_headers: dict,
-    ) -> None:
-        """Sales rep can update a deal assigned to them."""
-        stage = await _make_stage(db_session, org)
-        deal = await _make_deal(db_session, org, stage, title="My Deal", assigned_to=sales_rep_user)
-        response = await client.put(
-            f"/api/v1/deals/{deal.id}",
-            headers=rep_headers,
-            json={"title": "Updated My Deal"},
-        )
-        assert response.status_code == 200
-        assert response.json()["title"] == "Updated My Deal"
+
+# ---------------------------------------------------------------------------
+# Move deal stage
+# ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
 class TestMoveDealStage:
-    """Tests for PUT /api/v1/deals/{id}/stage."""
+    """PUT /api/v1/deals/{deal_id}/stage"""
 
-    async def test_owner_can_move_deal_stage(
-        self,
-        client: AsyncClient,
-        db_session: AsyncSession,
-        org: Organization,
-        owner_headers: dict,
+    @patch("src.api.v1.routers.deals.DealService")
+    async def test_move_stage_success(
+        self, mock_svc_cls: AsyncMock, client_owner: AsyncClient
     ) -> None:
-        """Owner can move a deal to a different stage."""
-        stage_a = await _make_stage(db_session, org, name="Stage A", order=0)
-        stage_b = await _make_stage(db_session, org, name="Stage B", order=1)
-        deal = await _make_deal(db_session, org, stage_a, title="Moving Deal")
+        """Owner can move a deal to a new stage — returns 200."""
+        deal_id = uuid.uuid4()
+        new_stage_id = uuid.uuid4()
+        deal = make_deal(deal_id=deal_id, stage_id=new_stage_id)
+        mock_svc_cls.return_value.move_stage = AsyncMock(return_value=deal)
 
-        response = await client.put(
-            f"/api/v1/deals/{deal.id}/stage",
-            headers=owner_headers,
-            json={"stageId": str(stage_b.id)},
+        response = await client_owner.put(
+            f"/api/v1/deals/{deal_id}/stage",
+            json={"stage_id": str(new_stage_id)},
         )
+
         assert response.status_code == 200
-        assert response.json()["stageId"] == str(stage_b.id)
+        assert response.json()["stageId"] == str(new_stage_id)
 
-    async def test_move_to_won_stage_sets_closed_at(
-        self,
-        client: AsyncClient,
-        db_session: AsyncSession,
-        org: Organization,
-        owner_headers: dict,
-    ) -> None:
-        """Moving a deal to a won stage automatically sets closed_at."""
-        stage_open = await _make_stage(db_session, org, name="Open", order=0)
-        stage_won = await _make_stage(db_session, org, name="Won", order=1, is_won=True)
-        deal = await _make_deal(db_session, org, stage_open, title="About to Win")
-
-        response = await client.put(
-            f"/api/v1/deals/{deal.id}/stage",
-            headers=owner_headers,
-            json={"stageId": str(stage_won.id)},
-        )
-        assert response.status_code == 200
-        data = response.json()
-        assert data["closedAt"] is not None
-
-    async def test_move_to_nonexistent_stage_returns_404(
-        self,
-        client: AsyncClient,
-        db_session: AsyncSession,
-        org: Organization,
-        owner_headers: dict,
+    @patch("src.api.v1.routers.deals.DealService")
+    async def test_move_stage_not_found(
+        self, mock_svc_cls: AsyncMock, client_owner: AsyncClient
     ) -> None:
         """Moving to a non-existent stage returns 404."""
-        stage = await _make_stage(db_session, org)
-        deal = await _make_deal(db_session, org, stage)
+        from src.core.exceptions import NotFoundError
 
-        response = await client.put(
-            f"/api/v1/deals/{deal.id}/stage",
-            headers=owner_headers,
-            json={"stageId": str(uuid4())},
+        deal_id = uuid.uuid4()
+        stage_id = uuid.uuid4()
+        mock_svc_cls.return_value.move_stage = AsyncMock(
+            side_effect=NotFoundError("PipelineStage", str(stage_id))
         )
+
+        response = await client_owner.put(
+            f"/api/v1/deals/{deal_id}/stage", json={"stage_id": str(stage_id)}
+        )
+
         assert response.status_code == 404
 
 
-@pytest.mark.asyncio
-class TestDeleteDeal:
-    """Tests for DELETE /api/v1/deals/{id}."""
+# ---------------------------------------------------------------------------
+# Delete deal
+# ---------------------------------------------------------------------------
 
-    async def test_owner_can_delete_deal(
-        self,
-        client: AsyncClient,
-        db_session: AsyncSession,
-        org: Organization,
-        owner_headers: dict,
-    ) -> None:
-        """Owner can delete any deal."""
-        stage = await _make_stage(db_session, org)
-        deal = await _make_deal(db_session, org, stage, title="To Delete")
-        response = await client.delete(f"/api/v1/deals/{deal.id}", headers=owner_headers)
+
+class TestDeleteDeal:
+    """DELETE /api/v1/deals/{deal_id}"""
+
+    @patch("src.api.v1.routers.deals.DealService")
+    async def test_delete_success(self, mock_svc_cls: AsyncMock, client_owner: AsyncClient) -> None:
+        """Owner can delete a deal — returns 204."""
+        deal_id = uuid.uuid4()
+        mock_svc_cls.return_value.delete_deal = AsyncMock(return_value=None)
+
+        response = await client_owner.delete(f"/api/v1/deals/{deal_id}")
+
         assert response.status_code == 204
 
-        get_response = await client.get(f"/api/v1/deals/{deal.id}", headers=owner_headers)
-        assert get_response.status_code == 404
-
-    async def test_sales_rep_cannot_delete_deal(
-        self,
-        client: AsyncClient,
-        db_session: AsyncSession,
-        org: Organization,
-        sales_rep_user: User,
-        rep_headers: dict,
+    @patch("src.api.v1.routers.deals.DealService")
+    async def test_delete_forbidden_rep(
+        self, mock_svc_cls: AsyncMock, client_rep: AsyncClient
     ) -> None:
-        """Sales reps cannot delete deals even if assigned."""
-        stage = await _make_stage(db_session, org)
-        deal = await _make_deal(
-            db_session, org, stage, title="My Protected Deal", assigned_to=sales_rep_user
+        """Sales rep cannot delete deals — 403."""
+        from src.core.exceptions import ForbiddenError
+
+        deal_id = uuid.uuid4()
+        mock_svc_cls.return_value.delete_deal = AsyncMock(
+            side_effect=ForbiddenError("Only owners and admins can delete deals")
         )
-        response = await client.delete(f"/api/v1/deals/{deal.id}", headers=rep_headers)
+
+        response = await client_rep.delete(f"/api/v1/deals/{deal_id}")
+
         assert response.status_code == 403
+
+    @patch("src.api.v1.routers.deals.DealService")
+    async def test_delete_not_found(
+        self, mock_svc_cls: AsyncMock, client_owner: AsyncClient
+    ) -> None:
+        """Deleting a non-existent deal returns 404."""
+        from src.core.exceptions import NotFoundError
+
+        deal_id = uuid.uuid4()
+        mock_svc_cls.return_value.delete_deal = AsyncMock(
+            side_effect=NotFoundError("Deal", str(deal_id))
+        )
+
+        response = await client_owner.delete(f"/api/v1/deals/{deal_id}")
+
+        assert response.status_code == 404

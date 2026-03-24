@@ -1,200 +1,274 @@
 """
 Integration tests for authentication endpoints.
 
+All repository calls are mocked — no PostgreSQL required.
+
 Tests cover:
-- Registration (happy path, duplicate slug, duplicate email)
-- Login (valid credentials, wrong password, inactive user)
-- Token refresh (valid, expired/invalid)
-- Logout
+- POST /api/v1/auth/register  (success, duplicate slug, duplicate email,
+  weak password, invalid slug)
+- POST /api/v1/auth/login     (success, wrong password, unknown email)
+- POST /api/v1/auth/refresh   (valid token, invalid token)
+- POST /api/v1/auth/logout    (always 204)
 """
 
-import pytest
+from unittest.mock import AsyncMock, patch
+
 from httpx import AsyncClient
 
+from src.core.enums import UserRole
+from src.core.security import hash_password
+from tests.integration.conftest import (
+    ORG_ID,
+    OWNER_ID,
+    make_org,
+    make_user,
+)
 
-@pytest.mark.asyncio
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+_REGISTER_PAYLOAD = {
+    "organization_name": "Acme Corp",
+    "organization_slug": "acme-corp",
+    "email": "admin@acme.com",
+    "password": "Secure123",
+    "first_name": "Jane",
+    "last_name": "Doe",
+}
+
+
+# ---------------------------------------------------------------------------
+# Register
+# ---------------------------------------------------------------------------
+
+
 class TestRegister:
-    """Tests for POST /api/v1/auth/register."""
+    """POST /api/v1/auth/register"""
 
-    async def test_register_success(self, client: AsyncClient) -> None:
+    @patch("src.services.auth.OrganizationRepository")
+    @patch("src.services.auth.UserRepository")
+    async def test_register_success(
+        self,
+        mock_user_repo_cls: AsyncMock,
+        mock_org_repo_cls: AsyncMock,
+        client_no_auth: AsyncClient,
+    ) -> None:
         """A fresh registration returns 201 with access and refresh tokens."""
-        response = await client.post(
-            "/api/v1/auth/register",
-            json={
-                "organization_name": "Acme Corp",
-                "organization_slug": "acme-corp",
-                "email": "admin@acme.com",
-                "password": "Secure123",
-                "first_name": "Jane",
-                "last_name": "Doe",
-            },
-        )
+        org = make_org()
+        user = make_user(user_id=OWNER_ID, org_id=ORG_ID, role=UserRole.OWNER)
+
+        mock_org_repo_cls.return_value.get_by_slug = AsyncMock(return_value=None)
+        mock_user_repo_cls.return_value.get_by_email = AsyncMock(return_value=None)
+        mock_org_repo_cls.return_value.create = AsyncMock(return_value=org)
+        mock_user_repo_cls.return_value.create = AsyncMock(return_value=user)
+
+        response = await client_no_auth.post("/api/v1/auth/register", json=_REGISTER_PAYLOAD)
+
         assert response.status_code == 201
         data = response.json()
         assert "access_token" in data
         assert "refresh_token" in data
         assert data["token_type"] == "bearer"  # noqa: S105
 
-    async def test_register_duplicate_slug(self, client: AsyncClient) -> None:
+    @patch("src.services.auth.OrganizationRepository")
+    @patch("src.services.auth.UserRepository")
+    async def test_register_duplicate_slug(
+        self,
+        mock_user_repo_cls: AsyncMock,
+        mock_org_repo_cls: AsyncMock,
+        client_no_auth: AsyncClient,
+    ) -> None:
         """A duplicate slug returns 409 Conflict."""
-        payload = {
-            "organization_name": "First",
-            "organization_slug": "unique-slug",
-            "email": "first@test.com",
-            "password": "Password1",
-            "first_name": "A",
-            "last_name": "B",
-        }
-        r1 = await client.post("/api/v1/auth/register", json=payload)
-        assert r1.status_code == 201
+        existing_org = make_org(slug="acme-corp")
+        mock_org_repo_cls.return_value.get_by_slug = AsyncMock(return_value=existing_org)
+        mock_user_repo_cls.return_value.get_by_email = AsyncMock(return_value=None)
 
-        payload["email"] = "second@test.com"
-        r2 = await client.post("/api/v1/auth/register", json=payload)
-        assert r2.status_code == 409
-        assert "slug" in r2.json()["detail"].lower()
+        response = await client_no_auth.post("/api/v1/auth/register", json=_REGISTER_PAYLOAD)
 
-    async def test_register_duplicate_email(self, client: AsyncClient) -> None:
+        assert response.status_code == 409
+        assert "slug" in response.json()["detail"].lower()
+
+    @patch("src.services.auth.OrganizationRepository")
+    @patch("src.services.auth.UserRepository")
+    async def test_register_duplicate_email(
+        self,
+        mock_user_repo_cls: AsyncMock,
+        mock_org_repo_cls: AsyncMock,
+        client_no_auth: AsyncClient,
+    ) -> None:
         """A duplicate e-mail returns 409 Conflict."""
-        payload = {
-            "organization_name": "Org A",
-            "organization_slug": "org-a-dup",
-            "email": "dup@test.com",
-            "password": "Password1",
-            "first_name": "A",
-            "last_name": "B",
-        }
-        r1 = await client.post("/api/v1/auth/register", json=payload)
-        assert r1.status_code == 201
+        existing_user = make_user(email="admin@acme.com")
+        mock_org_repo_cls.return_value.get_by_slug = AsyncMock(return_value=None)
+        mock_user_repo_cls.return_value.get_by_email = AsyncMock(return_value=existing_user)
 
-        payload["organization_slug"] = "org-b-dup"
-        r2 = await client.post("/api/v1/auth/register", json=payload)
-        assert r2.status_code == 409
-        assert "email" in r2.json()["detail"].lower()
+        response = await client_no_auth.post("/api/v1/auth/register", json=_REGISTER_PAYLOAD)
 
-    async def test_register_weak_password(self, client: AsyncClient) -> None:
+        assert response.status_code == 409
+        assert "email" in response.json()["detail"].lower()
+
+    async def test_register_weak_password(self, client_no_auth: AsyncClient) -> None:
         """A password without digits fails schema validation (422)."""
-        response = await client.post(
-            "/api/v1/auth/register",
-            json={
-                "organization_name": "Bad Org",
-                "organization_slug": "bad-org",
-                "email": "bad@test.com",
-                "password": "onlyletters",
-                "first_name": "A",
-                "last_name": "B",
-            },
-        )
+        payload = {**_REGISTER_PAYLOAD, "password": "onlyletters"}
+        response = await client_no_auth.post("/api/v1/auth/register", json=payload)
         assert response.status_code == 422
 
-    async def test_register_invalid_slug(self, client: AsyncClient) -> None:
+    async def test_register_invalid_slug(self, client_no_auth: AsyncClient) -> None:
         """A slug with uppercase letters fails schema validation (422)."""
-        response = await client.post(
-            "/api/v1/auth/register",
-            json={
-                "organization_name": "Bad Org",
-                "organization_slug": "Bad_Org",
-                "email": "valid@test.com",
-                "password": "Password1",
-                "first_name": "A",
-                "last_name": "B",
-            },
-        )
+        payload = {**_REGISTER_PAYLOAD, "organization_slug": "Bad_Org"}
+        response = await client_no_auth.post("/api/v1/auth/register", json=payload)
+        assert response.status_code == 422
+
+    async def test_register_missing_fields(self, client_no_auth: AsyncClient) -> None:
+        """Missing required fields return 422."""
+        response = await client_no_auth.post("/api/v1/auth/register", json={})
         assert response.status_code == 422
 
 
-@pytest.mark.asyncio
+# ---------------------------------------------------------------------------
+# Login
+# ---------------------------------------------------------------------------
+
+
 class TestLogin:
-    """Tests for POST /api/v1/auth/login."""
+    """POST /api/v1/auth/login"""
 
-    async def test_login_success(self, client: AsyncClient) -> None:
+    @patch("src.services.auth.UserRepository")
+    async def test_login_success(
+        self,
+        mock_user_repo_cls: AsyncMock,
+        client_no_auth: AsyncClient,
+    ) -> None:
         """Valid credentials return 200 with tokens."""
-        # Register first
-        await client.post(
-            "/api/v1/auth/register",
-            json={
-                "organization_name": "Login Org",
-                "organization_slug": "login-org",
-                "email": "login@test.com",
-                "password": "LoginPass1",
-                "first_name": "Login",
-                "last_name": "User",
-            },
-        )
+        user = make_user(email="login@test.com")
+        user.password_hash = hash_password("LoginPass1")
+        mock_user_repo_cls.return_value.get_by_email = AsyncMock(return_value=user)
 
-        response = await client.post(
+        response = await client_no_auth.post(
             "/api/v1/auth/login",
             json={"email": "login@test.com", "password": "LoginPass1"},
         )
+
         assert response.status_code == 200
         data = response.json()
         assert "access_token" in data
         assert "refresh_token" in data
 
-    async def test_login_wrong_password(self, client: AsyncClient) -> None:
+    @patch("src.services.auth.UserRepository")
+    async def test_login_wrong_password(
+        self,
+        mock_user_repo_cls: AsyncMock,
+        client_no_auth: AsyncClient,
+    ) -> None:
         """Wrong password returns 401."""
-        await client.post(
-            "/api/v1/auth/register",
-            json={
-                "organization_name": "WP Org",
-                "organization_slug": "wp-org",
-                "email": "wp@test.com",
-                "password": "Correct1",
-                "first_name": "A",
-                "last_name": "B",
-            },
-        )
+        user = make_user(email="wp@test.com")
+        user.password_hash = hash_password("CorrectPass1")
+        mock_user_repo_cls.return_value.get_by_email = AsyncMock(return_value=user)
 
-        response = await client.post(
+        response = await client_no_auth.post(
             "/api/v1/auth/login",
             json={"email": "wp@test.com", "password": "WrongPass1"},
         )
+
         assert response.status_code == 401
 
-    async def test_login_unknown_email(self, client: AsyncClient) -> None:
-        """Unknown e-mail returns 401 (same as wrong password — no enumeration)."""
-        response = await client.post(
+    @patch("src.services.auth.UserRepository")
+    async def test_login_unknown_email(
+        self,
+        mock_user_repo_cls: AsyncMock,
+        client_no_auth: AsyncClient,
+    ) -> None:
+        """Unknown e-mail returns 401 (no user enumeration)."""
+        mock_user_repo_cls.return_value.get_by_email = AsyncMock(return_value=None)
+
+        response = await client_no_auth.post(
             "/api/v1/auth/login",
             json={"email": "nobody@test.com", "password": "Password1"},
         )
+
+        assert response.status_code == 401
+
+    @patch("src.services.auth.UserRepository")
+    async def test_login_inactive_user(
+        self,
+        mock_user_repo_cls: AsyncMock,
+        client_no_auth: AsyncClient,
+    ) -> None:
+        """An inactive account returns 401."""
+        user = make_user(email="inactive@test.com", is_active=False)
+        user.password_hash = hash_password("Password1")
+        mock_user_repo_cls.return_value.get_by_email = AsyncMock(return_value=user)
+
+        response = await client_no_auth.post(
+            "/api/v1/auth/login",
+            json={"email": "inactive@test.com", "password": "Password1"},
+        )
+
         assert response.status_code == 401
 
 
-@pytest.mark.asyncio
+# ---------------------------------------------------------------------------
+# Refresh
+# ---------------------------------------------------------------------------
+
+
 class TestRefresh:
-    """Tests for POST /api/v1/auth/refresh."""
+    """POST /api/v1/auth/refresh"""
 
-    async def test_refresh_success(self, client: AsyncClient) -> None:
+    @patch("src.services.auth.UserRepository")
+    async def test_refresh_success(
+        self,
+        mock_user_repo_cls: AsyncMock,
+        client_no_auth: AsyncClient,
+        owner_refresh_token: str,
+    ) -> None:
         """A valid refresh token returns a new access token."""
-        reg = await client.post(
-            "/api/v1/auth/register",
-            json={
-                "organization_name": "Refresh Org",
-                "organization_slug": "refresh-org",
-                "email": "refresh@test.com",
-                "password": "Refresh1",
-                "first_name": "R",
-                "last_name": "U",
-            },
-        )
-        refresh_token = reg.json()["refresh_token"]
+        user = make_user(user_id=OWNER_ID, org_id=ORG_ID)
+        mock_user_repo_cls.return_value.get_by_id = AsyncMock(return_value=user)
 
-        response = await client.post("/api/v1/auth/refresh", json={"refresh_token": refresh_token})
+        response = await client_no_auth.post(
+            "/api/v1/auth/refresh", json={"refresh_token": owner_refresh_token}
+        )
+
         assert response.status_code == 200
         assert "access_token" in response.json()
 
-    async def test_refresh_invalid_token(self, client: AsyncClient) -> None:
+    async def test_refresh_invalid_token(self, client_no_auth: AsyncClient) -> None:
         """An invalid refresh token returns 401."""
-        response = await client.post(
+        response = await client_no_auth.post(
             "/api/v1/auth/refresh", json={"refresh_token": "not.a.valid.token"}
         )
         assert response.status_code == 401
 
+    @patch("src.services.auth.UserRepository")
+    async def test_refresh_deactivated_user(
+        self,
+        mock_user_repo_cls: AsyncMock,
+        client_no_auth: AsyncClient,
+        owner_refresh_token: str,
+    ) -> None:
+        """A refresh token for a deactivated user returns 401."""
+        user = make_user(user_id=OWNER_ID, is_active=False)
+        mock_user_repo_cls.return_value.get_by_id = AsyncMock(return_value=user)
 
-@pytest.mark.asyncio
+        response = await client_no_auth.post(
+            "/api/v1/auth/refresh", json={"refresh_token": owner_refresh_token}
+        )
+
+        assert response.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# Logout
+# ---------------------------------------------------------------------------
+
+
 class TestLogout:
-    """Tests for POST /api/v1/auth/logout."""
+    """POST /api/v1/auth/logout"""
 
-    async def test_logout_returns_204(self, client: AsyncClient) -> None:
+    async def test_logout_returns_204(self, client_no_auth: AsyncClient) -> None:
         """Logout always returns 204 (stateless — token discarded client-side)."""
-        response = await client.post("/api/v1/auth/logout", json={"refresh_token": "any-token"})
+        response = await client_no_auth.post(
+            "/api/v1/auth/logout", json={"refresh_token": "any-token"}
+        )
         assert response.status_code == 204

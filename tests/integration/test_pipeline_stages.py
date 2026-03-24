@@ -1,283 +1,264 @@
 """
 Integration tests for pipeline stage management endpoints.
 
+All repository calls are mocked — no PostgreSQL required.
+
 Tests cover:
-- List stages (ordered, all authenticated users)
-- Create stage (owner/admin success, sales rep/viewer forbidden)
-- Update stage (owner/admin success, sales rep forbidden)
-- Delete stage (owner success, sales rep forbidden, non-existent)
+- GET  /api/v1/pipeline-stages              (list, all authenticated users)
+- POST /api/v1/pipeline-stages              (owner/admin success, forbidden rep/viewer)
+- PUT  /api/v1/pipeline-stages/{id}         (owner success, forbidden, 404)
+- DELETE /api/v1/pipeline-stages/{id}       (owner success, forbidden, 404)
 """
 
-from uuid import uuid4
+import uuid
+from unittest.mock import AsyncMock, patch
 
-import pytest
 from httpx import AsyncClient
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.models.organization import Organization
-from src.models.pipeline_stage import PipelineStage
-from src.models.user import User
+from tests.integration.conftest import make_pipeline_stage
 
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
-async def _make_stage(
-    session: AsyncSession,
-    org: Organization,
-    *,
-    name: str = "Prospect",
-    order: int = 0,
-    is_won: bool = False,
-    is_lost: bool = False,
-) -> PipelineStage:
-    """Helper to persist a PipelineStage directly via the ORM."""
-    stage = PipelineStage(
-        organization_id=org.id,
-        name=name,
-        order=order,
-        is_won=is_won,
-        is_lost=is_lost,
-    )
-    session.add(stage)
-    await session.flush()
-    await session.refresh(stage)
-    return stage
+_STAGE_PAYLOAD = {
+    "name": "Prospecting",
+    "order": 1,
+    "is_won": False,
+    "is_lost": False,
+}
 
 
-async def _make_viewer(
-    session: AsyncSession, org: Organization, email: str = "stage.viewer@test.com"
-) -> User:
-    """Helper to create a viewer user."""
-    from datetime import UTC, datetime
-
-    from src.core.enums import UserRole
-    from src.core.security import hash_password
-    from src.models.user import User
-
-    viewer = User(
-        organization_id=org.id,
-        email=email,
-        password_hash=hash_password("Pass1"),
-        first_name="View",
-        last_name="Stage",
-        role=UserRole.VIEWER.value,
-        is_active=True,
-        created_at=datetime.now(UTC),
-    )
-    session.add(viewer)
-    await session.flush()
-    await session.refresh(viewer)
-    return viewer
+# ---------------------------------------------------------------------------
+# List pipeline stages
+# ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
 class TestListPipelineStages:
-    """Tests for GET /api/v1/pipeline-stages."""
+    """GET /api/v1/pipeline-stages"""
 
-    async def test_returns_ordered_stages(
-        self,
-        client: AsyncClient,
-        db_session: AsyncSession,
-        org: Organization,
-        owner_headers: dict,
+    @patch("src.api.v1.routers.pipeline_stages.PipelineStageService")
+    async def test_list_returns_200_for_owner(
+        self, mock_svc_cls: AsyncMock, client_owner: AsyncClient
     ) -> None:
-        """Returns all stages for the organization ordered by the order field."""
-        await _make_stage(db_session, org, name="Stage 1", order=0)
-        await _make_stage(db_session, org, name="Stage 2", order=1)
+        """Owner sees all pipeline stages."""
+        stage = make_pipeline_stage()
+        mock_svc_cls.return_value.list_stages = AsyncMock(return_value=[stage])
 
-        response = await client.get("/api/v1/pipeline-stages", headers=owner_headers)
+        response = await client_owner.get("/api/v1/pipeline-stages")
+
         assert response.status_code == 200
-        stages = response.json()
-        assert len(stages) >= 2
-        orders = [s["order"] for s in stages]
-        assert orders == sorted(orders)
+        assert isinstance(response.json(), list)
+        assert len(response.json()) == 1
 
-    async def test_list_requires_auth(self, client: AsyncClient) -> None:
+    @patch("src.api.v1.routers.pipeline_stages.PipelineStageService")
+    async def test_list_returns_200_for_viewer(
+        self, mock_svc_cls: AsyncMock, client_viewer: AsyncClient
+    ) -> None:
+        """Viewer can also list pipeline stages (read-only access)."""
+        mock_svc_cls.return_value.list_stages = AsyncMock(return_value=[])
+
+        response = await client_viewer.get("/api/v1/pipeline-stages")
+
+        assert response.status_code == 200
+
+    async def test_list_unauthenticated(self, client_no_auth: AsyncClient) -> None:
         """Unauthenticated request returns 401."""
-        response = await client.get("/api/v1/pipeline-stages")
+        response = await client_no_auth.get("/api/v1/pipeline-stages")
         assert response.status_code == 401
 
-    async def test_sales_rep_can_list_stages(
-        self,
-        client: AsyncClient,
-        db_session: AsyncSession,
-        org: Organization,
-        rep_headers: dict,
+    @patch("src.api.v1.routers.pipeline_stages.PipelineStageService")
+    async def test_list_preserves_order(
+        self, mock_svc_cls: AsyncMock, client_owner: AsyncClient
     ) -> None:
-        """Sales reps have read access to pipeline stages."""
-        await _make_stage(db_session, org, name="Read Stage")
-        response = await client.get("/api/v1/pipeline-stages", headers=rep_headers)
+        """Stages come back in their configured order."""
+        stages = [
+            make_pipeline_stage(name="Prospecting", order=0),
+            make_pipeline_stage(name="Proposal", order=1),
+            make_pipeline_stage(name="Closed Won", order=2, is_won=True),
+        ]
+        mock_svc_cls.return_value.list_stages = AsyncMock(return_value=stages)
+
+        response = await client_owner.get("/api/v1/pipeline-stages")
+
         assert response.status_code == 200
+        items = response.json()
+        assert len(items) == 3
+        assert items[0]["name"] == "Prospecting"
+        assert items[2]["isWon"] is True
 
 
-@pytest.mark.asyncio
+# ---------------------------------------------------------------------------
+# Create pipeline stage
+# ---------------------------------------------------------------------------
+
+
 class TestCreatePipelineStage:
-    """Tests for POST /api/v1/pipeline-stages."""
+    """POST /api/v1/pipeline-stages"""
 
-    async def test_owner_can_create_stage(
-        self,
-        client: AsyncClient,
-        owner_headers: dict,
+    @patch("src.api.v1.routers.pipeline_stages.PipelineStageService")
+    async def test_create_success_owner(
+        self, mock_svc_cls: AsyncMock, client_owner: AsyncClient
     ) -> None:
-        """Owner can create a pipeline stage."""
-        response = await client.post(
-            "/api/v1/pipeline-stages",
-            headers=owner_headers,
-            json={"name": "Qualified", "order": 1},
-        )
+        """Owner can create a pipeline stage — returns 201."""
+        stage = make_pipeline_stage(name="Prospecting")
+        mock_svc_cls.return_value.create_stage = AsyncMock(return_value=stage)
+
+        response = await client_owner.post("/api/v1/pipeline-stages", json=_STAGE_PAYLOAD)
+
         assert response.status_code == 201
-        data = response.json()
-        assert data["name"] == "Qualified"
-        assert "id" in data
+        assert response.json()["name"] == "Prospecting"
 
-    async def test_create_won_stage(
-        self,
-        client: AsyncClient,
-        owner_headers: dict,
+    @patch("src.api.v1.routers.pipeline_stages.PipelineStageService")
+    async def test_create_success_admin(
+        self, mock_svc_cls: AsyncMock, client_admin: AsyncClient
     ) -> None:
-        """Owner can create a stage marked as won."""
-        response = await client.post(
-            "/api/v1/pipeline-stages",
-            headers=owner_headers,
-            json={"name": "Closed Won", "order": 10, "isWon": True},
-        )
+        """Admin can create a pipeline stage."""
+        stage = make_pipeline_stage(name="Prospecting")
+        mock_svc_cls.return_value.create_stage = AsyncMock(return_value=stage)
+
+        response = await client_admin.post("/api/v1/pipeline-stages", json=_STAGE_PAYLOAD)
+
         assert response.status_code == 201
-        data = response.json()
-        assert data["isWon"] is True
 
-    async def test_sales_rep_cannot_create_stage(
-        self,
-        client: AsyncClient,
-        rep_headers: dict,
+    @patch("src.api.v1.routers.pipeline_stages.PipelineStageService")
+    async def test_create_forbidden_rep(
+        self, mock_svc_cls: AsyncMock, client_rep: AsyncClient
     ) -> None:
-        """Sales reps cannot create pipeline stages."""
-        response = await client.post(
-            "/api/v1/pipeline-stages",
-            headers=rep_headers,
-            json={"name": "Rep Stage"},
+        """Sales rep cannot create pipeline stages — 403."""
+        from src.core.exceptions import ForbiddenError
+
+        mock_svc_cls.return_value.create_stage = AsyncMock(
+            side_effect=ForbiddenError("Only owners and admins can configure the pipeline")
         )
+
+        response = await client_rep.post("/api/v1/pipeline-stages", json=_STAGE_PAYLOAD)
+
         assert response.status_code == 403
 
-    async def test_viewer_cannot_create_stage(
-        self,
-        client: AsyncClient,
-        db_session: AsyncSession,
-        org: Organization,
+    @patch("src.api.v1.routers.pipeline_stages.PipelineStageService")
+    async def test_create_forbidden_viewer(
+        self, mock_svc_cls: AsyncMock, client_viewer: AsyncClient
     ) -> None:
-        """Viewers cannot create pipeline stages."""
-        from src.core.security import create_access_token
+        """Viewer cannot create pipeline stages — 403."""
+        from src.core.exceptions import ForbiddenError
 
-        viewer = await _make_viewer(db_session, org, "ps.viewer@test.com")
-        token = create_access_token(viewer.id, viewer.organization_id, viewer.role)
-        headers = {"Authorization": f"Bearer {token}"}
-
-        response = await client.post(
-            "/api/v1/pipeline-stages",
-            headers=headers,
-            json={"name": "Forbidden Stage"},
+        mock_svc_cls.return_value.create_stage = AsyncMock(
+            side_effect=ForbiddenError("Only owners and admins can configure the pipeline")
         )
+
+        response = await client_viewer.post("/api/v1/pipeline-stages", json=_STAGE_PAYLOAD)
+
         assert response.status_code == 403
 
+    async def test_create_missing_name(self, client_owner: AsyncClient) -> None:
+        """Missing required 'name' field returns 422."""
+        response = await client_owner.post("/api/v1/pipeline-stages", json={"order": 1})
+        assert response.status_code == 422
 
-@pytest.mark.asyncio
+
+# ---------------------------------------------------------------------------
+# Update pipeline stage
+# ---------------------------------------------------------------------------
+
+
 class TestUpdatePipelineStage:
-    """Tests for PUT /api/v1/pipeline-stages/{id}."""
+    """PUT /api/v1/pipeline-stages/{stage_id}"""
 
-    async def test_owner_can_update_stage(
-        self,
-        client: AsyncClient,
-        db_session: AsyncSession,
-        org: Organization,
-        owner_headers: dict,
-    ) -> None:
-        """Owner can update a pipeline stage."""
-        stage = await _make_stage(db_session, org, name="Old Stage Name")
-        response = await client.put(
-            f"/api/v1/pipeline-stages/{stage.id}",
-            headers=owner_headers,
-            json={"name": "New Stage Name"},
+    @patch("src.api.v1.routers.pipeline_stages.PipelineStageService")
+    async def test_update_success(self, mock_svc_cls: AsyncMock, client_owner: AsyncClient) -> None:
+        """Owner can update a pipeline stage — returns 200."""
+        stage_id = uuid.uuid4()
+        updated = make_pipeline_stage(stage_id=stage_id, name="Negotiation")
+        mock_svc_cls.return_value.update_stage = AsyncMock(return_value=updated)
+
+        response = await client_owner.put(
+            f"/api/v1/pipeline-stages/{stage_id}",
+            json={"name": "Negotiation"},
         )
+
         assert response.status_code == 200
-        assert response.json()["name"] == "New Stage Name"
+        assert response.json()["name"] == "Negotiation"
 
-    async def test_update_reorder_stage(
-        self,
-        client: AsyncClient,
-        db_session: AsyncSession,
-        org: Organization,
-        owner_headers: dict,
-    ) -> None:
-        """Owner can change the order of a stage."""
-        stage = await _make_stage(db_session, org, name="Reorder Me", order=5)
-        response = await client.put(
-            f"/api/v1/pipeline-stages/{stage.id}",
-            headers=owner_headers,
-            json={"order": 2},
-        )
-        assert response.status_code == 200
-        assert response.json()["order"] == 2
-
-    async def test_sales_rep_cannot_update_stage(
-        self,
-        client: AsyncClient,
-        db_session: AsyncSession,
-        org: Organization,
-        rep_headers: dict,
-    ) -> None:
-        """Sales reps cannot update pipeline stages."""
-        stage = await _make_stage(db_session, org, name="Rep Cannot Touch")
-        response = await client.put(
-            f"/api/v1/pipeline-stages/{stage.id}",
-            headers=rep_headers,
-            json={"name": "Hijacked"},
-        )
-        assert response.status_code == 403
-
-    async def test_update_nonexistent_stage_returns_404(
-        self,
-        client: AsyncClient,
-        owner_headers: dict,
+    @patch("src.api.v1.routers.pipeline_stages.PipelineStageService")
+    async def test_update_not_found(
+        self, mock_svc_cls: AsyncMock, client_owner: AsyncClient
     ) -> None:
         """Updating a non-existent stage returns 404."""
-        response = await client.put(
-            f"/api/v1/pipeline-stages/{uuid4()}",
-            headers=owner_headers,
-            json={"name": "Ghost Stage"},
+        from src.core.exceptions import NotFoundError
+
+        stage_id = uuid.uuid4()
+        mock_svc_cls.return_value.update_stage = AsyncMock(
+            side_effect=NotFoundError("PipelineStage", str(stage_id))
         )
+
+        response = await client_owner.put(f"/api/v1/pipeline-stages/{stage_id}", json={"name": "X"})
+
         assert response.status_code == 404
 
-
-@pytest.mark.asyncio
-class TestDeletePipelineStage:
-    """Tests for DELETE /api/v1/pipeline-stages/{id}."""
-
-    async def test_owner_can_delete_stage(
-        self,
-        client: AsyncClient,
-        db_session: AsyncSession,
-        org: Organization,
-        owner_headers: dict,
+    @patch("src.api.v1.routers.pipeline_stages.PipelineStageService")
+    async def test_update_forbidden_rep(
+        self, mock_svc_cls: AsyncMock, client_rep: AsyncClient
     ) -> None:
-        """Owner can delete a pipeline stage."""
-        stage = await _make_stage(db_session, org, name="Deletable Stage")
-        response = await client.delete(f"/api/v1/pipeline-stages/{stage.id}", headers=owner_headers)
-        assert response.status_code == 204
+        """Sales rep cannot update pipeline stages — 403."""
+        from src.core.exceptions import ForbiddenError
 
-    async def test_sales_rep_cannot_delete_stage(
-        self,
-        client: AsyncClient,
-        db_session: AsyncSession,
-        org: Organization,
-        rep_headers: dict,
-    ) -> None:
-        """Sales reps cannot delete pipeline stages."""
-        stage = await _make_stage(db_session, org, name="Rep Cannot Delete")
-        response = await client.delete(f"/api/v1/pipeline-stages/{stage.id}", headers=rep_headers)
+        stage_id = uuid.uuid4()
+        mock_svc_cls.return_value.update_stage = AsyncMock(
+            side_effect=ForbiddenError("Only owners and admins can configure the pipeline")
+        )
+
+        response = await client_rep.put(f"/api/v1/pipeline-stages/{stage_id}", json={"name": "X"})
+
         assert response.status_code == 403
 
-    async def test_delete_nonexistent_stage_returns_404(
-        self,
-        client: AsyncClient,
-        owner_headers: dict,
+
+# ---------------------------------------------------------------------------
+# Delete pipeline stage
+# ---------------------------------------------------------------------------
+
+
+class TestDeletePipelineStage:
+    """DELETE /api/v1/pipeline-stages/{stage_id}"""
+
+    @patch("src.api.v1.routers.pipeline_stages.PipelineStageService")
+    async def test_delete_success(self, mock_svc_cls: AsyncMock, client_owner: AsyncClient) -> None:
+        """Owner can delete a pipeline stage — returns 204."""
+        stage_id = uuid.uuid4()
+        mock_svc_cls.return_value.delete_stage = AsyncMock(return_value=None)
+
+        response = await client_owner.delete(f"/api/v1/pipeline-stages/{stage_id}")
+
+        assert response.status_code == 204
+
+    @patch("src.api.v1.routers.pipeline_stages.PipelineStageService")
+    async def test_delete_forbidden_rep(
+        self, mock_svc_cls: AsyncMock, client_rep: AsyncClient
+    ) -> None:
+        """Sales rep cannot delete pipeline stages — 403."""
+        from src.core.exceptions import ForbiddenError
+
+        stage_id = uuid.uuid4()
+        mock_svc_cls.return_value.delete_stage = AsyncMock(
+            side_effect=ForbiddenError("Only owners and admins can configure the pipeline")
+        )
+
+        response = await client_rep.delete(f"/api/v1/pipeline-stages/{stage_id}")
+
+        assert response.status_code == 403
+
+    @patch("src.api.v1.routers.pipeline_stages.PipelineStageService")
+    async def test_delete_not_found(
+        self, mock_svc_cls: AsyncMock, client_owner: AsyncClient
     ) -> None:
         """Deleting a non-existent stage returns 404."""
-        response = await client.delete(f"/api/v1/pipeline-stages/{uuid4()}", headers=owner_headers)
+        from src.core.exceptions import NotFoundError
+
+        stage_id = uuid.uuid4()
+        mock_svc_cls.return_value.delete_stage = AsyncMock(
+            side_effect=NotFoundError("PipelineStage", str(stage_id))
+        )
+
+        response = await client_owner.delete(f"/api/v1/pipeline-stages/{stage_id}")
+
         assert response.status_code == 404

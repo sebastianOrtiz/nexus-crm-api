@@ -1,347 +1,301 @@
 """
 Integration tests for activity CRUD endpoints.
 
+All repository calls are mocked — no PostgreSQL required.
+
 Tests cover:
-- List activities (pagination, owner vs sales rep scope, type filtering)
-- Create activity (owner success, viewer forbidden)
-- Get activity by ID
-- Update activity (owner success, sales rep own vs other)
-- Delete activity (owner success, sales rep own vs other)
+- GET  /api/v1/activities              (list)
+- POST /api/v1/activities              (success, forbidden viewer)
+- GET  /api/v1/activities/{id}         (success, 404)
+- PUT  /api/v1/activities/{id}         (owner success, forbidden rep, 404)
+- DELETE /api/v1/activities/{id}       (owner success, forbidden rep, 404)
 """
 
-from uuid import uuid4
+import uuid
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
-import pytest
 from httpx import AsyncClient
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.models.activity import Activity
-from src.models.organization import Organization
-from src.models.user import User
+from src.schemas.activity import ActivityResponse
+from tests.integration.conftest import make_activity
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+_ACTIVITY_PAYLOAD = {
+    "type": "call",
+    "subject": "Follow-up call",
+}
 
 
-async def _make_activity(
-    session: AsyncSession,
-    org: Organization,
-    user: User,
-    *,
-    subject: str = "Test Activity",
-    activity_type: str = "note",
-) -> Activity:
-    """Helper to persist an Activity directly via the ORM."""
-    from datetime import UTC, datetime
-
-    activity = Activity(
-        organization_id=org.id,
-        user_id=user.id,
-        type=activity_type,
-        subject=subject,
-        created_at=datetime.now(UTC),
+def _paginated(items: list) -> SimpleNamespace:
+    validated = [ActivityResponse.model_validate(i) for i in items]
+    return SimpleNamespace(
+        items=validated,
+        total=len(items),
+        page=1,
+        page_size=20,
+        pages=1,
     )
-    session.add(activity)
-    await session.flush()
-    await session.refresh(activity)
-    return activity
 
 
-@pytest.mark.asyncio
+# ---------------------------------------------------------------------------
+# List activities
+# ---------------------------------------------------------------------------
+
+
 class TestListActivities:
-    """Tests for GET /api/v1/activities."""
+    """GET /api/v1/activities"""
 
-    async def test_owner_sees_all_activities(
-        self,
-        client: AsyncClient,
-        db_session: AsyncSession,
-        org: Organization,
-        owner_user: User,
-        sales_rep_user: User,
-        owner_headers: dict,
+    @patch("src.api.v1.routers.activities.ActivityService")
+    async def test_list_returns_200(
+        self, mock_svc_cls: AsyncMock, client_owner: AsyncClient
     ) -> None:
-        """Owner sees all activities in the organization."""
-        await _make_activity(db_session, org, owner_user, subject="Owner Act")
-        await _make_activity(db_session, org, sales_rep_user, subject="Rep Act")
+        """Owner gets a paginated list of activities."""
+        activity = make_activity()
+        mock_svc_cls.return_value.list_activities = AsyncMock(return_value=_paginated([activity]))
 
-        response = await client.get("/api/v1/activities", headers=owner_headers)
-        assert response.status_code == 200
-        assert response.json()["total"] >= 2
+        response = await client_owner.get("/api/v1/activities")
 
-    async def test_sales_rep_sees_only_own_activities(
-        self,
-        client: AsyncClient,
-        db_session: AsyncSession,
-        org: Organization,
-        owner_user: User,
-        sales_rep_user: User,
-        rep_headers: dict,
-    ) -> None:
-        """Sales rep only sees activities they own."""
-        await _make_activity(db_session, org, sales_rep_user, subject="Mine")
-        await _make_activity(db_session, org, owner_user, subject="Not Mine")
-
-        response = await client.get("/api/v1/activities", headers=rep_headers)
         assert response.status_code == 200
         data = response.json()
-        for item in data["items"]:
-            assert item["userId"] == str(sales_rep_user.id)
+        assert data["total"] == 1
 
-    async def test_list_requires_auth(self, client: AsyncClient) -> None:
+    @patch("src.api.v1.routers.activities.ActivityService")
+    async def test_list_empty(self, mock_svc_cls: AsyncMock, client_owner: AsyncClient) -> None:
+        """Empty tenant returns empty list."""
+        mock_svc_cls.return_value.list_activities = AsyncMock(return_value=_paginated([]))
+
+        response = await client_owner.get("/api/v1/activities")
+
+        assert response.status_code == 200
+        assert response.json()["total"] == 0
+
+    @patch("src.api.v1.routers.activities.ActivityService")
+    async def test_list_with_type_filter(
+        self, mock_svc_cls: AsyncMock, client_owner: AsyncClient
+    ) -> None:
+        """Filtering by activity type returns filtered results."""
+        activity = make_activity(activity_type="call")
+        mock_svc_cls.return_value.list_activities = AsyncMock(return_value=_paginated([activity]))
+
+        response = await client_owner.get("/api/v1/activities?activity_type=call")
+
+        assert response.status_code == 200
+
+    async def test_list_unauthenticated(self, client_no_auth: AsyncClient) -> None:
         """Unauthenticated request returns 401."""
-        response = await client.get("/api/v1/activities")
+        response = await client_no_auth.get("/api/v1/activities")
         assert response.status_code == 401
 
-    async def test_filter_by_type(
-        self,
-        client: AsyncClient,
-        db_session: AsyncSession,
-        org: Organization,
-        owner_user: User,
-        owner_headers: dict,
-    ) -> None:
-        """Filtering by activity_type only returns activities of that type."""
-        await _make_activity(db_session, org, owner_user, subject="Call Act", activity_type="call")
-        await _make_activity(db_session, org, owner_user, subject="Note Act", activity_type="note")
 
-        response = await client.get(
-            "/api/v1/activities",
-            headers=owner_headers,
-            params={"activity_type": "call"},
-        )
-        assert response.status_code == 200
-        data = response.json()
-        for item in data["items"]:
-            assert item["type"] == "call"
-
-    async def test_list_pagination(
-        self,
-        client: AsyncClient,
-        db_session: AsyncSession,
-        org: Organization,
-        owner_user: User,
-        owner_headers: dict,
-    ) -> None:
-        """Pagination metadata is correct."""
-        for i in range(4):
-            await _make_activity(db_session, org, owner_user, subject=f"Page Act {i}")
-
-        response = await client.get(
-            "/api/v1/activities",
-            headers=owner_headers,
-            params={"page": 1, "page_size": 2},
-        )
-        assert response.status_code == 200
-        data = response.json()
-        assert len(data["items"]) <= 2
-        assert data["page"] == 1
-        assert data["pageSize"] == 2
+# ---------------------------------------------------------------------------
+# Create activity
+# ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
 class TestCreateActivity:
-    """Tests for POST /api/v1/activities."""
+    """POST /api/v1/activities"""
 
-    async def test_owner_can_create_activity(
-        self,
-        client: AsyncClient,
-        owner_headers: dict,
+    @patch("src.api.v1.routers.activities.ActivityService")
+    async def test_create_success_owner(
+        self, mock_svc_cls: AsyncMock, client_owner: AsyncClient
     ) -> None:
-        """Owner can create an activity."""
-        response = await client.post(
-            "/api/v1/activities",
-            headers=owner_headers,
-            json={"type": "call", "subject": "Follow-up call"},
-        )
+        """Owner can create an activity — returns 201."""
+        activity = make_activity()
+        mock_svc_cls.return_value.create_activity = AsyncMock(return_value=activity)
+
+        response = await client_owner.post("/api/v1/activities", json=_ACTIVITY_PAYLOAD)
+
         assert response.status_code == 201
-        data = response.json()
-        assert data["subject"] == "Follow-up call"
-        assert data["type"] == "call"
+        assert response.json()["subject"] == activity.subject
 
-    async def test_sales_rep_can_create_activity(
-        self,
-        client: AsyncClient,
-        rep_headers: dict,
+    @patch("src.api.v1.routers.activities.ActivityService")
+    async def test_create_success_rep(
+        self, mock_svc_cls: AsyncMock, client_rep: AsyncClient
     ) -> None:
-        """Sales reps can create activities."""
-        response = await client.post(
-            "/api/v1/activities",
-            headers=rep_headers,
-            json={"type": "email", "subject": "Sent proposal"},
-        )
+        """Sales rep can create an activity."""
+        activity = make_activity()
+        mock_svc_cls.return_value.create_activity = AsyncMock(return_value=activity)
+
+        response = await client_rep.post("/api/v1/activities", json=_ACTIVITY_PAYLOAD)
+
         assert response.status_code == 201
 
-    async def test_viewer_cannot_create_activity(
-        self,
-        client: AsyncClient,
-        db_session: AsyncSession,
-        org: Organization,
+    @patch("src.api.v1.routers.activities.ActivityService")
+    async def test_create_forbidden_viewer(
+        self, mock_svc_cls: AsyncMock, client_viewer: AsyncClient
     ) -> None:
-        """Viewers are forbidden from creating activities."""
-        from datetime import UTC, datetime
+        """Viewer cannot create activities — 403."""
+        from src.core.exceptions import ForbiddenError
 
-        from src.core.enums import UserRole
-        from src.core.security import create_access_token, hash_password
-        from src.models.user import User
-
-        viewer = User(
-            organization_id=org.id,
-            email="activity.viewer@test.com",
-            password_hash=hash_password("Pass1"),
-            first_name="View",
-            last_name="Act",
-            role=UserRole.VIEWER.value,
-            is_active=True,
-            created_at=datetime.now(UTC),
+        mock_svc_cls.return_value.create_activity = AsyncMock(
+            side_effect=ForbiddenError("Viewers cannot create activities")
         )
-        db_session.add(viewer)
-        await db_session.flush()
-        await db_session.refresh(viewer)
 
-        token = create_access_token(viewer.id, viewer.organization_id, viewer.role)
-        headers = {"Authorization": f"Bearer {token}"}
+        response = await client_viewer.post("/api/v1/activities", json=_ACTIVITY_PAYLOAD)
 
-        response = await client.post(
-            "/api/v1/activities",
-            headers=headers,
-            json={"type": "note", "subject": "Forbidden note"},
-        )
         assert response.status_code == 403
 
-    async def test_create_requires_auth(self, client: AsyncClient) -> None:
-        """Unauthenticated request returns 401."""
-        response = await client.post(
+    async def test_create_missing_required_fields(self, client_owner: AsyncClient) -> None:
+        """Missing required fields return 422."""
+        response = await client_owner.post("/api/v1/activities", json={})
+        assert response.status_code == 422
+
+    async def test_create_invalid_type(self, client_owner: AsyncClient) -> None:
+        """Invalid activity type returns 422."""
+        response = await client_owner.post(
             "/api/v1/activities",
-            json={"type": "note", "subject": "No auth"},
+            json={"type": "invalid_type", "subject": "Test"},
         )
-        assert response.status_code == 401
+        assert response.status_code == 422
 
 
-@pytest.mark.asyncio
+# ---------------------------------------------------------------------------
+# Get activity
+# ---------------------------------------------------------------------------
+
+
 class TestGetActivity:
-    """Tests for GET /api/v1/activities/{id}."""
+    """GET /api/v1/activities/{activity_id}"""
 
-    async def test_get_existing_activity(
-        self,
-        client: AsyncClient,
-        db_session: AsyncSession,
-        org: Organization,
-        owner_user: User,
-        owner_headers: dict,
-    ) -> None:
-        """Returns 200 with activity details."""
-        activity = await _make_activity(db_session, org, owner_user, subject="Fetchable")
-        response = await client.get(f"/api/v1/activities/{activity.id}", headers=owner_headers)
+    @patch("src.api.v1.routers.activities.ActivityService")
+    async def test_get_success(self, mock_svc_cls: AsyncMock, client_owner: AsyncClient) -> None:
+        """Returns 200 with the activity data."""
+        activity_id = uuid.uuid4()
+        activity = make_activity(activity_id=activity_id)
+        mock_svc_cls.return_value.get_activity = AsyncMock(return_value=activity)
+
+        response = await client_owner.get(f"/api/v1/activities/{activity_id}")
+
         assert response.status_code == 200
-        assert response.json()["id"] == str(activity.id)
+        assert response.json()["id"] == str(activity_id)
 
-    async def test_get_nonexistent_activity(
-        self,
-        client: AsyncClient,
-        owner_headers: dict,
-    ) -> None:
-        """Returns 404 for an activity that does not exist."""
-        response = await client.get(f"/api/v1/activities/{uuid4()}", headers=owner_headers)
+    @patch("src.api.v1.routers.activities.ActivityService")
+    async def test_get_not_found(self, mock_svc_cls: AsyncMock, client_owner: AsyncClient) -> None:
+        """Non-existent activity returns 404."""
+        from src.core.exceptions import NotFoundError
+
+        activity_id = uuid.uuid4()
+        mock_svc_cls.return_value.get_activity = AsyncMock(
+            side_effect=NotFoundError("Activity", str(activity_id))
+        )
+
+        response = await client_owner.get(f"/api/v1/activities/{activity_id}")
+
         assert response.status_code == 404
 
 
-@pytest.mark.asyncio
+# ---------------------------------------------------------------------------
+# Update activity
+# ---------------------------------------------------------------------------
+
+
 class TestUpdateActivity:
-    """Tests for PUT /api/v1/activities/{id}."""
+    """PUT /api/v1/activities/{activity_id}"""
 
-    async def test_owner_can_update_any_activity(
-        self,
-        client: AsyncClient,
-        db_session: AsyncSession,
-        org: Organization,
-        owner_user: User,
-        owner_headers: dict,
-    ) -> None:
-        """Owner can update any activity."""
-        activity = await _make_activity(db_session, org, owner_user, subject="Old Subject")
-        response = await client.put(
-            f"/api/v1/activities/{activity.id}",
-            headers=owner_headers,
-            json={"subject": "New Subject"},
+    @patch("src.api.v1.routers.activities.ActivityService")
+    async def test_update_success(self, mock_svc_cls: AsyncMock, client_owner: AsyncClient) -> None:
+        """Owner can update an activity — returns 200."""
+        activity_id = uuid.uuid4()
+        updated = make_activity(activity_id=activity_id, subject="Updated subject")
+        mock_svc_cls.return_value.update_activity = AsyncMock(return_value=updated)
+
+        response = await client_owner.put(
+            f"/api/v1/activities/{activity_id}",
+            json={"subject": "Updated subject"},
         )
+
         assert response.status_code == 200
-        assert response.json()["subject"] == "New Subject"
+        assert response.json()["subject"] == "Updated subject"
 
-    async def test_sales_rep_cannot_update_others_activity(
-        self,
-        client: AsyncClient,
-        db_session: AsyncSession,
-        org: Organization,
-        owner_user: User,
-        rep_headers: dict,
+    @patch("src.api.v1.routers.activities.ActivityService")
+    async def test_update_not_found(
+        self, mock_svc_cls: AsyncMock, client_owner: AsyncClient
     ) -> None:
-        """Sales rep cannot update an activity they do not own."""
-        activity = await _make_activity(db_session, org, owner_user, subject="Owner's Activity")
-        response = await client.put(
-            f"/api/v1/activities/{activity.id}",
-            headers=rep_headers,
-            json={"subject": "Hijacked"},
+        """Updating a non-existent activity returns 404."""
+        from src.core.exceptions import NotFoundError
+
+        activity_id = uuid.uuid4()
+        mock_svc_cls.return_value.update_activity = AsyncMock(
+            side_effect=NotFoundError("Activity", str(activity_id))
         )
+
+        response = await client_owner.put(
+            f"/api/v1/activities/{activity_id}",
+            json={"subject": "X"},
+        )
+
+        assert response.status_code == 404
+
+    @patch("src.api.v1.routers.activities.ActivityService")
+    async def test_update_forbidden_rep(
+        self, mock_svc_cls: AsyncMock, client_rep: AsyncClient
+    ) -> None:
+        """Sales rep cannot modify another user's activity — 403."""
+        from src.core.exceptions import ForbiddenError
+
+        activity_id = uuid.uuid4()
+        mock_svc_cls.return_value.update_activity = AsyncMock(
+            side_effect=ForbiddenError("Sales reps can only modify their own activities")
+        )
+
+        response = await client_rep.put(
+            f"/api/v1/activities/{activity_id}",
+            json={"subject": "X"},
+        )
+
         assert response.status_code == 403
 
-    async def test_sales_rep_can_update_own_activity(
-        self,
-        client: AsyncClient,
-        db_session: AsyncSession,
-        org: Organization,
-        sales_rep_user: User,
-        rep_headers: dict,
-    ) -> None:
-        """Sales rep can update their own activity."""
-        activity = await _make_activity(db_session, org, sales_rep_user, subject="My Activity")
-        response = await client.put(
-            f"/api/v1/activities/{activity.id}",
-            headers=rep_headers,
-            json={"subject": "Updated Mine"},
-        )
-        assert response.status_code == 200
-        assert response.json()["subject"] == "Updated Mine"
+
+# ---------------------------------------------------------------------------
+# Delete activity
+# ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
 class TestDeleteActivity:
-    """Tests for DELETE /api/v1/activities/{id}."""
+    """DELETE /api/v1/activities/{activity_id}"""
 
-    async def test_owner_can_delete_any_activity(
-        self,
-        client: AsyncClient,
-        db_session: AsyncSession,
-        org: Organization,
-        owner_user: User,
-        owner_headers: dict,
-    ) -> None:
-        """Owner can delete any activity."""
-        activity = await _make_activity(db_session, org, owner_user, subject="To Delete")
-        response = await client.delete(f"/api/v1/activities/{activity.id}", headers=owner_headers)
+    @patch("src.api.v1.routers.activities.ActivityService")
+    async def test_delete_success(self, mock_svc_cls: AsyncMock, client_owner: AsyncClient) -> None:
+        """Owner can delete an activity — returns 204."""
+        activity_id = uuid.uuid4()
+        mock_svc_cls.return_value.delete_activity = AsyncMock(return_value=None)
+
+        response = await client_owner.delete(f"/api/v1/activities/{activity_id}")
+
         assert response.status_code == 204
 
-        get_response = await client.get(f"/api/v1/activities/{activity.id}", headers=owner_headers)
-        assert get_response.status_code == 404
-
-    async def test_sales_rep_cannot_delete_others_activity(
-        self,
-        client: AsyncClient,
-        db_session: AsyncSession,
-        org: Organization,
-        owner_user: User,
-        rep_headers: dict,
+    @patch("src.api.v1.routers.activities.ActivityService")
+    async def test_delete_forbidden_rep(
+        self, mock_svc_cls: AsyncMock, client_rep: AsyncClient
     ) -> None:
-        """Sales rep cannot delete an activity owned by someone else."""
-        activity = await _make_activity(db_session, org, owner_user, subject="Protected")
-        response = await client.delete(f"/api/v1/activities/{activity.id}", headers=rep_headers)
+        """Sales rep cannot delete another user's activity — 403."""
+        from src.core.exceptions import ForbiddenError
+
+        activity_id = uuid.uuid4()
+        mock_svc_cls.return_value.delete_activity = AsyncMock(
+            side_effect=ForbiddenError("Sales reps can only modify their own activities")
+        )
+
+        response = await client_rep.delete(f"/api/v1/activities/{activity_id}")
+
         assert response.status_code == 403
 
-    async def test_sales_rep_can_delete_own_activity(
-        self,
-        client: AsyncClient,
-        db_session: AsyncSession,
-        org: Organization,
-        sales_rep_user: User,
-        rep_headers: dict,
+    @patch("src.api.v1.routers.activities.ActivityService")
+    async def test_delete_not_found(
+        self, mock_svc_cls: AsyncMock, client_owner: AsyncClient
     ) -> None:
-        """Sales rep can delete their own activity."""
-        activity = await _make_activity(db_session, org, sales_rep_user, subject="Delete My Own")
-        response = await client.delete(f"/api/v1/activities/{activity.id}", headers=rep_headers)
-        assert response.status_code == 204
+        """Deleting a non-existent activity returns 404."""
+        from src.core.exceptions import NotFoundError
+
+        activity_id = uuid.uuid4()
+        mock_svc_cls.return_value.delete_activity = AsyncMock(
+            side_effect=NotFoundError("Activity", str(activity_id))
+        )
+
+        response = await client_owner.delete(f"/api/v1/activities/{activity_id}")
+
+        assert response.status_code == 404

@@ -2,10 +2,10 @@
 Pydantic schemas for dashboard/analytics endpoints.
 """
 
-from pydantic import BaseModel
+from src.schemas.common import CamelModel
 
 
-class DashboardStats(BaseModel):
+class DashboardStats(CamelModel):
     """
     High-level KPI numbers for the dashboard header cards.
 
@@ -26,7 +26,7 @@ class DashboardStats(BaseModel):
     total_companies: int
 
 
-class PipelineStageStats(BaseModel):
+class PipelineStageStats(CamelModel):
     """Deal count and total value for a single pipeline stage."""
 
     stage_id: str
@@ -35,13 +35,13 @@ class PipelineStageStats(BaseModel):
     total_value: float
 
 
-class PipelineStats(BaseModel):
+class PipelineStats(CamelModel):
     """Funnel data: one entry per pipeline stage."""
 
     stages: list[PipelineStageStats]
 
 
-class RevenueByPeriod(BaseModel):
+class RevenueByPeriod(CamelModel):
     """Revenue aggregated by a calendar period (e.g., month)."""
 
     period: str
@@ -50,13 +50,13 @@ class RevenueByPeriod(BaseModel):
     deal_count: int
 
 
-class RevenueStats(BaseModel):
+class RevenueStats(CamelModel):
     """Revenue chart data for the past N periods."""
 
     periods: list[RevenueByPeriod]
 
 
-class RecentActivity(BaseModel):
+class RecentActivity(CamelModel):
     """A single entry in the recent activity feed."""
 
     id: str
@@ -66,7 +66,7 @@ class RecentActivity(BaseModel):
     created_at: str
 
 
-class ActivityStats(BaseModel):
+class ActivityStats(CamelModel):
     """Activity feed data for the dashboard."""
 
     recent: list[RecentActivity]

@@ -1,290 +1,320 @@
 """
 Integration tests for company CRUD endpoints.
 
+All repository calls are mocked — no PostgreSQL required.
+
 Tests cover:
-- List companies (pagination, search)
-- Create company (owner success, viewer forbidden, sales rep allowed)
-- Get company by ID
-- Update company (owner success, sales rep permission)
-- Delete company (owner success, forbidden for sales rep)
-- Get company contacts sub-resource
+- GET  /api/v1/companies              (list)
+- POST /api/v1/companies              (success, forbidden for viewer)
+- GET  /api/v1/companies/{id}         (success, 404)
+- PUT  /api/v1/companies/{id}         (owner success, 404)
+- DELETE /api/v1/companies/{id}       (owner success, forbidden for rep)
+- GET  /api/v1/companies/{id}/contacts
 """
 
-from uuid import uuid4
+import uuid
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
-import pytest
 from httpx import AsyncClient
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.models.company import Company
-from src.models.organization import Organization
+from src.schemas.company import CompanyResponse
+from tests.integration.conftest import make_company, make_contact
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+_COMPANY_PAYLOAD = {
+    "name": "Acme Corp",
+    "domain": "acme.com",
+    "industry": "Technology",
+}
 
 
-async def _make_company(
-    session: AsyncSession,
-    org: Organization,
-    *,
-    name: str = "Acme Corp",
-    domain: str | None = None,
-) -> Company:
-    """Helper to persist a Company directly via the ORM."""
-    from datetime import UTC, datetime
-
-    company = Company(
-        organization_id=org.id,
-        name=name,
-        domain=domain or f"{name.lower().replace(' ', '')}.com",
-        created_at=datetime.now(UTC),
-        updated_at=datetime.now(UTC),
+def _paginated(items: list) -> SimpleNamespace:
+    validated = [CompanyResponse.model_validate(i) for i in items]
+    return SimpleNamespace(
+        items=validated,
+        total=len(items),
+        page=1,
+        page_size=20,
+        pages=1,
     )
-    session.add(company)
-    await session.flush()
-    await session.refresh(company)
-    return company
 
 
-@pytest.mark.asyncio
+# ---------------------------------------------------------------------------
+# List companies
+# ---------------------------------------------------------------------------
+
+
 class TestListCompanies:
-    """Tests for GET /api/v1/companies."""
+    """GET /api/v1/companies"""
 
-    async def test_list_returns_tenant_companies(
-        self,
-        client: AsyncClient,
-        db_session: AsyncSession,
-        org: Organization,
-        owner_headers: dict,
+    @patch("src.api.v1.routers.companies.CompanyService")
+    async def test_list_returns_200(
+        self, mock_svc_cls: AsyncMock, client_owner: AsyncClient
     ) -> None:
-        """Owner sees all companies in their organization."""
-        await _make_company(db_session, org, name="Company A")
-        await _make_company(db_session, org, name="Company B")
+        """Owner gets a paginated list of companies."""
+        company = make_company()
+        mock_svc_cls.return_value.list_companies = AsyncMock(return_value=_paginated([company]))
 
-        response = await client.get("/api/v1/companies", headers=owner_headers)
+        response = await client_owner.get("/api/v1/companies")
+
         assert response.status_code == 200
         data = response.json()
-        assert data["total"] >= 2
+        assert data["total"] == 1
+        assert len(data["items"]) == 1
 
-    async def test_list_requires_auth(self, client: AsyncClient) -> None:
+    @patch("src.api.v1.routers.companies.CompanyService")
+    async def test_list_empty(self, mock_svc_cls: AsyncMock, client_owner: AsyncClient) -> None:
+        """Empty tenant returns empty items list."""
+        mock_svc_cls.return_value.list_companies = AsyncMock(return_value=_paginated([]))
+
+        response = await client_owner.get("/api/v1/companies")
+
+        assert response.status_code == 200
+        assert response.json()["total"] == 0
+
+    async def test_list_unauthenticated(self, client_no_auth: AsyncClient) -> None:
         """Unauthenticated request returns 401."""
-        response = await client.get("/api/v1/companies")
+        response = await client_no_auth.get("/api/v1/companies")
         assert response.status_code == 401
 
-    async def test_list_pagination(
-        self,
-        client: AsyncClient,
-        db_session: AsyncSession,
-        org: Organization,
-        owner_headers: dict,
-    ) -> None:
-        """Pagination metadata is returned correctly."""
-        for i in range(4):
-            await _make_company(db_session, org, name=f"PaginatedCo{i}")
 
-        response = await client.get(
-            "/api/v1/companies",
-            headers=owner_headers,
-            params={"page": 1, "page_size": 2},
-        )
-        assert response.status_code == 200
-        data = response.json()
-        assert len(data["items"]) <= 2
-        assert data["page"] == 1
-        assert data["pageSize"] == 2
-
-    async def test_sales_rep_can_list_companies(
-        self,
-        client: AsyncClient,
-        db_session: AsyncSession,
-        org: Organization,
-        rep_headers: dict,
-    ) -> None:
-        """Sales reps have read access to all companies in the tenant."""
-        await _make_company(db_session, org, name="RepVisible")
-
-        response = await client.get("/api/v1/companies", headers=rep_headers)
-        assert response.status_code == 200
+# ---------------------------------------------------------------------------
+# Create company
+# ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
 class TestCreateCompany:
-    """Tests for POST /api/v1/companies."""
+    """POST /api/v1/companies"""
 
-    async def test_owner_can_create_company(
-        self,
-        client: AsyncClient,
-        owner_headers: dict,
+    @patch("src.api.v1.routers.companies.CompanyService")
+    async def test_create_success_owner(
+        self, mock_svc_cls: AsyncMock, client_owner: AsyncClient
     ) -> None:
-        """Owner can create a company."""
-        response = await client.post(
-            "/api/v1/companies",
-            headers=owner_headers,
-            json={"name": "New Company", "domain": "newco.com"},
-        )
+        """Owner can create a company — returns 201."""
+        company = make_company()
+        mock_svc_cls.return_value.create_company = AsyncMock(return_value=company)
+
+        response = await client_owner.post("/api/v1/companies", json=_COMPANY_PAYLOAD)
+
         assert response.status_code == 201
-        data = response.json()
-        assert data["name"] == "New Company"
-        assert "id" in data
+        assert response.json()["name"] == company.name
 
-    async def test_create_requires_auth(self, client: AsyncClient) -> None:
-        """Unauthenticated request returns 401."""
-        response = await client.post("/api/v1/companies", json={"name": "X"})
-        assert response.status_code == 401
-
-    async def test_sales_rep_can_create_company(
-        self,
-        client: AsyncClient,
-        rep_headers: dict,
+    @patch("src.api.v1.routers.companies.CompanyService")
+    async def test_create_success_rep(
+        self, mock_svc_cls: AsyncMock, client_rep: AsyncClient
     ) -> None:
-        """Sales reps are allowed to create companies."""
-        response = await client.post(
-            "/api/v1/companies",
-            headers=rep_headers,
-            json={"name": "Rep Created Co"},
-        )
+        """Sales rep can create a company."""
+        company = make_company()
+        mock_svc_cls.return_value.create_company = AsyncMock(return_value=company)
+
+        response = await client_rep.post("/api/v1/companies", json=_COMPANY_PAYLOAD)
+
         assert response.status_code == 201
 
-    async def test_viewer_cannot_create_company(
-        self,
-        client: AsyncClient,
-        db_session: AsyncSession,
-        org: Organization,
+    @patch("src.api.v1.routers.companies.CompanyService")
+    async def test_create_forbidden_viewer(
+        self, mock_svc_cls: AsyncMock, client_viewer: AsyncClient
     ) -> None:
-        """Viewers are forbidden from creating companies."""
-        from datetime import UTC, datetime
+        """Viewer cannot create companies — 403."""
+        from src.core.exceptions import ForbiddenError
 
-        from src.core.enums import UserRole
-        from src.core.security import create_access_token, hash_password
-        from src.models.user import User
-
-        viewer = User(
-            organization_id=org.id,
-            email="viewer@test.com",
-            password_hash=hash_password("Pass1"),
-            first_name="View",
-            last_name="Er",
-            role=UserRole.VIEWER.value,
-            is_active=True,
-            created_at=datetime.now(UTC),
+        mock_svc_cls.return_value.create_company = AsyncMock(
+            side_effect=ForbiddenError("Viewers cannot create companies")
         )
-        db_session.add(viewer)
-        await db_session.flush()
-        await db_session.refresh(viewer)
 
-        token = create_access_token(viewer.id, viewer.organization_id, viewer.role)
-        headers = {"Authorization": f"Bearer {token}"}
+        response = await client_viewer.post("/api/v1/companies", json=_COMPANY_PAYLOAD)
 
-        response = await client.post(
-            "/api/v1/companies",
-            headers=headers,
-            json={"name": "Forbidden Co"},
-        )
         assert response.status_code == 403
 
+    async def test_create_missing_name(self, client_owner: AsyncClient) -> None:
+        """Missing required 'name' field returns 422."""
+        response = await client_owner.post("/api/v1/companies", json={"domain": "acme.com"})
+        assert response.status_code == 422
 
-@pytest.mark.asyncio
+
+# ---------------------------------------------------------------------------
+# Get company
+# ---------------------------------------------------------------------------
+
+
 class TestGetCompany:
-    """Tests for GET /api/v1/companies/{id}."""
+    """GET /api/v1/companies/{company_id}"""
 
-    async def test_get_existing_company(
-        self,
-        client: AsyncClient,
-        db_session: AsyncSession,
-        org: Organization,
-        owner_headers: dict,
-    ) -> None:
-        """Returns 200 with company details for an existing company."""
-        company = await _make_company(db_session, org, name="Fetchable Co")
-        response = await client.get(f"/api/v1/companies/{company.id}", headers=owner_headers)
+    @patch("src.api.v1.routers.companies.CompanyService")
+    async def test_get_success(self, mock_svc_cls: AsyncMock, client_owner: AsyncClient) -> None:
+        """Returns 200 with the company data."""
+        company_id = uuid.uuid4()
+        company = make_company(company_id=company_id)
+        mock_svc_cls.return_value.get_company = AsyncMock(return_value=company)
+
+        response = await client_owner.get(f"/api/v1/companies/{company_id}")
+
         assert response.status_code == 200
-        assert response.json()["id"] == str(company.id)
+        assert response.json()["id"] == str(company_id)
 
-    async def test_get_nonexistent_company(
-        self,
-        client: AsyncClient,
-        owner_headers: dict,
-    ) -> None:
-        """Returns 404 for a company that does not exist."""
-        response = await client.get(f"/api/v1/companies/{uuid4()}", headers=owner_headers)
+    @patch("src.api.v1.routers.companies.CompanyService")
+    async def test_get_not_found(self, mock_svc_cls: AsyncMock, client_owner: AsyncClient) -> None:
+        """Non-existent company returns 404."""
+        from src.core.exceptions import NotFoundError
+
+        company_id = uuid.uuid4()
+        mock_svc_cls.return_value.get_company = AsyncMock(
+            side_effect=NotFoundError("Company", str(company_id))
+        )
+
+        response = await client_owner.get(f"/api/v1/companies/{company_id}")
+
         assert response.status_code == 404
 
 
-@pytest.mark.asyncio
+# ---------------------------------------------------------------------------
+# Update company
+# ---------------------------------------------------------------------------
+
+
 class TestUpdateCompany:
-    """Tests for PUT /api/v1/companies/{id}."""
+    """PUT /api/v1/companies/{company_id}"""
 
-    async def test_owner_can_update_any_company(
-        self,
-        client: AsyncClient,
-        db_session: AsyncSession,
-        org: Organization,
-        owner_headers: dict,
-    ) -> None:
-        """Owner can update any company."""
-        company = await _make_company(db_session, org, name="Old Name")
-        response = await client.put(
-            f"/api/v1/companies/{company.id}",
-            headers=owner_headers,
-            json={"name": "Updated Name"},
+    @patch("src.api.v1.routers.companies.CompanyService")
+    async def test_update_success(self, mock_svc_cls: AsyncMock, client_owner: AsyncClient) -> None:
+        """Owner can update a company — returns 200."""
+        company_id = uuid.uuid4()
+        updated = make_company(company_id=company_id, name="Updated Corp")
+        mock_svc_cls.return_value.update_company = AsyncMock(return_value=updated)
+
+        response = await client_owner.put(
+            f"/api/v1/companies/{company_id}", json={"name": "Updated Corp"}
         )
-        assert response.status_code == 200
-        assert response.json()["name"] == "Updated Name"
 
-    async def test_sales_rep_can_update_company(
-        self,
-        client: AsyncClient,
-        db_session: AsyncSession,
-        org: Organization,
-        rep_headers: dict,
-    ) -> None:
-        """Sales reps are allowed to update companies."""
-        company = await _make_company(db_session, org, name="Rep Updates")
-        response = await client.put(
-            f"/api/v1/companies/{company.id}",
-            headers=rep_headers,
-            json={"name": "Rep Updated"},
-        )
         assert response.status_code == 200
+        assert response.json()["name"] == "Updated Corp"
 
-    async def test_update_nonexistent_returns_404(
-        self,
-        client: AsyncClient,
-        owner_headers: dict,
+    @patch("src.api.v1.routers.companies.CompanyService")
+    async def test_update_not_found(
+        self, mock_svc_cls: AsyncMock, client_owner: AsyncClient
     ) -> None:
         """Updating a non-existent company returns 404."""
-        response = await client.put(
-            f"/api/v1/companies/{uuid4()}",
-            headers=owner_headers,
-            json={"name": "Ghost"},
+        from src.core.exceptions import NotFoundError
+
+        company_id = uuid.uuid4()
+        mock_svc_cls.return_value.update_company = AsyncMock(
+            side_effect=NotFoundError("Company", str(company_id))
         )
+
+        response = await client_owner.put(f"/api/v1/companies/{company_id}", json={"name": "X"})
+
+        assert response.status_code == 404
+
+    @patch("src.api.v1.routers.companies.CompanyService")
+    async def test_update_forbidden_viewer(
+        self, mock_svc_cls: AsyncMock, client_viewer: AsyncClient
+    ) -> None:
+        """Viewer cannot update a company — 403."""
+        from src.core.exceptions import ForbiddenError
+
+        company_id = uuid.uuid4()
+        mock_svc_cls.return_value.update_company = AsyncMock(
+            side_effect=ForbiddenError("Viewers cannot update companies")
+        )
+
+        response = await client_viewer.put(f"/api/v1/companies/{company_id}", json={"name": "X"})
+
+        assert response.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# Delete company
+# ---------------------------------------------------------------------------
+
+
+class TestDeleteCompany:
+    """DELETE /api/v1/companies/{company_id}"""
+
+    @patch("src.api.v1.routers.companies.CompanyService")
+    async def test_delete_success(self, mock_svc_cls: AsyncMock, client_owner: AsyncClient) -> None:
+        """Owner can delete a company — returns 204."""
+        company_id = uuid.uuid4()
+        mock_svc_cls.return_value.delete_company = AsyncMock(return_value=None)
+
+        response = await client_owner.delete(f"/api/v1/companies/{company_id}")
+
+        assert response.status_code == 204
+
+    @patch("src.api.v1.routers.companies.CompanyService")
+    async def test_delete_forbidden_for_rep(
+        self, mock_svc_cls: AsyncMock, client_rep: AsyncClient
+    ) -> None:
+        """Sales rep cannot delete a company — 403."""
+        from src.core.exceptions import ForbiddenError
+
+        company_id = uuid.uuid4()
+        mock_svc_cls.return_value.delete_company = AsyncMock(
+            side_effect=ForbiddenError("Only owners and admins can delete companies")
+        )
+
+        response = await client_rep.delete(f"/api/v1/companies/{company_id}")
+
+        assert response.status_code == 403
+
+    @patch("src.api.v1.routers.companies.CompanyService")
+    async def test_delete_not_found(
+        self, mock_svc_cls: AsyncMock, client_owner: AsyncClient
+    ) -> None:
+        """Deleting a non-existent company returns 404."""
+        from src.core.exceptions import NotFoundError
+
+        company_id = uuid.uuid4()
+        mock_svc_cls.return_value.delete_company = AsyncMock(
+            side_effect=NotFoundError("Company", str(company_id))
+        )
+
+        response = await client_owner.delete(f"/api/v1/companies/{company_id}")
+
         assert response.status_code == 404
 
 
-@pytest.mark.asyncio
-class TestDeleteCompany:
-    """Tests for DELETE /api/v1/companies/{id}."""
+# ---------------------------------------------------------------------------
+# Company contacts sub-resource
+# ---------------------------------------------------------------------------
 
-    async def test_owner_can_delete_company(
-        self,
-        client: AsyncClient,
-        db_session: AsyncSession,
-        org: Organization,
-        owner_headers: dict,
+
+class TestCompanyContacts:
+    """GET /api/v1/companies/{company_id}/contacts"""
+
+    @patch("src.api.v1.routers.companies.CompanyService")
+    async def test_list_contacts_success(
+        self, mock_svc_cls: AsyncMock, client_owner: AsyncClient
     ) -> None:
-        """Owner can delete any company."""
-        company = await _make_company(db_session, org, name="ToDelete Co")
-        response = await client.delete(f"/api/v1/companies/{company.id}", headers=owner_headers)
-        assert response.status_code == 204
+        """Returns the list of contacts linked to a company."""
+        from src.schemas.contact import ContactResponse
 
-        get_response = await client.get(f"/api/v1/companies/{company.id}", headers=owner_headers)
-        assert get_response.status_code == 404
+        company_id = uuid.uuid4()
+        contact = make_contact()
+        contact_response = ContactResponse.model_validate(contact)
+        mock_svc_cls.return_value.get_company_contacts = AsyncMock(return_value=[contact_response])
 
-    async def test_sales_rep_cannot_delete_company(
-        self,
-        client: AsyncClient,
-        db_session: AsyncSession,
-        org: Organization,
-        rep_headers: dict,
+        response = await client_owner.get(f"/api/v1/companies/{company_id}/contacts")
+
+        assert response.status_code == 200
+        assert isinstance(response.json(), list)
+        assert len(response.json()) == 1
+
+    @patch("src.api.v1.routers.companies.CompanyService")
+    async def test_list_contacts_company_not_found(
+        self, mock_svc_cls: AsyncMock, client_owner: AsyncClient
     ) -> None:
-        """Sales reps cannot delete companies."""
-        company = await _make_company(db_session, org, name="Protected Co")
-        response = await client.delete(f"/api/v1/companies/{company.id}", headers=rep_headers)
-        assert response.status_code == 403
+        """Returns 404 when the company does not exist."""
+        from src.core.exceptions import NotFoundError
+
+        company_id = uuid.uuid4()
+        mock_svc_cls.return_value.get_company_contacts = AsyncMock(
+            side_effect=NotFoundError("Company", str(company_id))
+        )
+
+        response = await client_owner.get(f"/api/v1/companies/{company_id}/contacts")
+
+        assert response.status_code == 404

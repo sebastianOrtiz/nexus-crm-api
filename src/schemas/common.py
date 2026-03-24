@@ -6,6 +6,7 @@ from typing import Generic, TypeVar
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
+from pydantic.alias_generators import to_camel
 
 T = TypeVar("T")
 
@@ -15,10 +16,15 @@ class CamelModel(BaseModel):
     Base model that serialises field names as camelCase.
 
     The Angular frontend expects camelCase JSON, so all response schemas
-    inherit from this base.
+    inherit from this base.  ``alias_generator=to_camel`` converts
+    ``snake_case`` Python attributes to ``camelCase`` when serialising to
+    JSON and when parsing incoming JSON bodies.  ``populate_by_name=True``
+    keeps both the original snake_case name and the camelCase alias valid
+    for construction (useful in tests and internal code).
     """
 
     model_config = ConfigDict(
+        alias_generator=to_camel,
         populate_by_name=True,
         from_attributes=True,
     )
@@ -42,7 +48,11 @@ class PaginatedResponse(BaseModel, Generic[T]):
     page_size: int
     pages: int
 
-    model_config = ConfigDict(from_attributes=True)
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+        from_attributes=True,
+    )
 
 
 class IDResponse(BaseModel):

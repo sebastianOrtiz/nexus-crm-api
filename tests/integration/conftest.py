@@ -1,255 +1,330 @@
 """
-Integration test fixtures — requieren una base de datos PostgreSQL activa.
+Integration test fixtures — no database required.
 
-Arquitectura de fixtures:
-- ``create_test_tables`` (session-scope): crea/elimina tablas una vez por sesión.
-- ``db_session`` (function-scope): sesión con rollback automático por test.
-- ``client`` (function-scope): AsyncClient con la sesión de test inyectada.
-- Fixtures de datos: ``org``, ``owner_user``, ``sales_rep_user``, tokens y headers.
+All repository calls are mocked at the service layer.  The FastAPI
+``get_current_user`` dependency is overridden to return a SimpleNamespace
+object that mimics the User ORM model, so no real JWT decoding or database
+lookup happens during tests.
 
-El override de ``get_session`` garantiza que cada request HTTP del cliente de test
-usa la misma sesión rolled-back, así ningún test contamina al siguiente.
+Strategy
+--------
+* ``get_session`` is overridden to yield an ``AsyncMock`` — the session
+  object is passed to repository constructors, but every repository method
+  is patched before the request reaches it.
+* ``get_current_user`` is overridden per-fixture to return users of different
+  roles.  This avoids touching the JWT or UserRepository code paths.
+* Helper factories (``make_*``) produce ``SimpleNamespace`` objects that
+  satisfy Pydantic ``from_attributes=True`` validation used in response
+  schemas.
 """
 
-import os
+import uuid
 from collections.abc import AsyncGenerator
+from datetime import UTC, datetime
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
+import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import (
-    AsyncSession,
-    async_sessionmaker,
-    create_async_engine,
-)
-from sqlalchemy.pool import NullPool
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.core.database import get_session
+from src.api.v1.dependencies import get_current_user, get_session
 from src.core.enums import UserRole
-from src.core.security import create_access_token, hash_password
+from src.core.security import create_access_token, create_refresh_token
 from src.main import create_app
-from src.models import Base
-from src.models.organization import Organization
-from src.models.user import User
 
 # ---------------------------------------------------------------------------
-# Test database
+# Fixed UUIDs shared across tests (deterministic, not random)
 # ---------------------------------------------------------------------------
 
-TEST_DATABASE_URL = os.environ.get(
-    "TEST_DATABASE_URL",
-    "postgresql+asyncpg://postgres:postgres@localhost:5432/nexuscrm_test",
-)
-
-test_engine = create_async_engine(TEST_DATABASE_URL, poolclass=NullPool, echo=False)
-
-TestingSessionFactory = async_sessionmaker(
-    bind=test_engine,
-    class_=AsyncSession,
-    expire_on_commit=False,
-    autoflush=False,
-    autocommit=False,
-)
+ORG_ID = uuid.UUID("00000000-0000-0000-0000-000000000001")
+OWNER_ID = uuid.UUID("00000000-0000-0000-0000-000000000010")
+ADMIN_ID = uuid.UUID("00000000-0000-0000-0000-000000000020")
+REP_ID = uuid.UUID("00000000-0000-0000-0000-000000000030")
+VIEWER_ID = uuid.UUID("00000000-0000-0000-0000-000000000040")
 
 
 # ---------------------------------------------------------------------------
-# Session-scoped: create schema + tables once
+# SimpleNamespace factories — mimic ORM models with from_attributes=True
 # ---------------------------------------------------------------------------
 
 
-@pytest_asyncio.fixture(scope="session")
-async def create_test_tables() -> AsyncGenerator[None, None]:
-    """
-    Create the ``crm`` schema and all tables before the first test in the
-    session, then drop everything after the last test.
+def make_org(
+    *,
+    org_id: uuid.UUID = ORG_ID,
+    name: str = "Test Org",
+    slug: str = "test-org",
+) -> SimpleNamespace:
+    """Return a SimpleNamespace that looks like an Organization ORM object."""
+    return SimpleNamespace(
+        id=org_id,
+        name=name,
+        slug=slug,
+        plan="free",
+        is_active=True,
+        created_at=datetime(2024, 1, 1, tzinfo=UTC),
+        updated_at=datetime(2024, 1, 1, tzinfo=UTC),
+    )
 
-    Yields:
-        Nothing — used purely for setup/teardown side effects.
-    """
-    async with test_engine.begin() as conn:
-        await conn.execute(text("CREATE SCHEMA IF NOT EXISTS crm"))
-        await conn.run_sync(Base.metadata.create_all)
-    yield
-    async with test_engine.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)
-        await conn.execute(text("DROP SCHEMA IF EXISTS crm CASCADE"))
+
+def make_user(
+    *,
+    user_id: uuid.UUID = OWNER_ID,
+    org_id: uuid.UUID = ORG_ID,
+    role: UserRole = UserRole.OWNER,
+    email: str = "owner@test.com",
+    is_active: bool = True,
+) -> SimpleNamespace:
+    """Return a SimpleNamespace that looks like a User ORM object."""
+    return SimpleNamespace(
+        id=user_id,
+        organization_id=org_id,
+        email=email,
+        password_hash="$2b$12$fakehash",  # noqa: S106 — test fixture, not a real password
+        first_name="Test",
+        last_name=role.value.title(),
+        role=role.value,
+        is_active=is_active,
+        created_at=datetime(2024, 1, 1, tzinfo=UTC),
+    )
+
+
+def make_contact(
+    *,
+    contact_id: uuid.UUID | None = None,
+    org_id: uuid.UUID = ORG_ID,
+    first_name: str = "John",
+    last_name: str = "Doe",
+    email: str = "john.doe@test.com",
+    assigned_to_id: uuid.UUID | None = None,
+    source: str = "other",
+) -> SimpleNamespace:
+    """Return a SimpleNamespace that looks like a Contact ORM object."""
+    now = datetime(2024, 1, 1, tzinfo=UTC)
+    return SimpleNamespace(
+        id=contact_id or uuid.uuid4(),
+        organization_id=org_id,
+        company_id=None,
+        first_name=first_name,
+        last_name=last_name,
+        email=email,
+        phone=None,
+        position=None,
+        source=source,
+        notes=None,
+        assigned_to_id=assigned_to_id,
+        created_at=now,
+        updated_at=now,
+    )
+
+
+def make_company(
+    *,
+    company_id: uuid.UUID | None = None,
+    org_id: uuid.UUID = ORG_ID,
+    name: str = "Acme Corp",
+) -> SimpleNamespace:
+    """Return a SimpleNamespace that looks like a Company ORM object."""
+    now = datetime(2024, 1, 1, tzinfo=UTC)
+    return SimpleNamespace(
+        id=company_id or uuid.uuid4(),
+        organization_id=org_id,
+        name=name,
+        domain="acme.com",
+        industry="Technology",
+        phone=None,
+        address=None,
+        notes=None,
+        created_at=now,
+        updated_at=now,
+    )
+
+
+def make_pipeline_stage(
+    *,
+    stage_id: uuid.UUID | None = None,
+    org_id: uuid.UUID = ORG_ID,
+    name: str = "Prospecting",
+    order: int = 0,
+    is_won: bool = False,
+    is_lost: bool = False,
+) -> SimpleNamespace:
+    """Return a SimpleNamespace that looks like a PipelineStage ORM object."""
+    return SimpleNamespace(
+        id=stage_id or uuid.uuid4(),
+        organization_id=org_id,
+        name=name,
+        order=order,
+        is_won=is_won,
+        is_lost=is_lost,
+    )
+
+
+def make_deal(
+    *,
+    deal_id: uuid.UUID | None = None,
+    org_id: uuid.UUID = ORG_ID,
+    stage_id: uuid.UUID | None = None,
+    title: str = "Big Deal",
+    value: float = 10000.0,
+    currency: str = "USD",
+    assigned_to_id: uuid.UUID | None = None,
+    closed_at: datetime | None = None,
+) -> SimpleNamespace:
+    """Return a SimpleNamespace that looks like a Deal ORM object."""
+    now = datetime(2024, 1, 1, tzinfo=UTC)
+    return SimpleNamespace(
+        id=deal_id or uuid.uuid4(),
+        organization_id=org_id,
+        title=title,
+        value=value,
+        currency=currency,
+        stage_id=stage_id or uuid.uuid4(),
+        contact_id=None,
+        company_id=None,
+        assigned_to_id=assigned_to_id,
+        expected_close=None,
+        closed_at=closed_at,
+        created_at=now,
+        updated_at=now,
+    )
+
+
+def make_activity(
+    *,
+    activity_id: uuid.UUID | None = None,
+    org_id: uuid.UUID = ORG_ID,
+    user_id: uuid.UUID = OWNER_ID,
+    activity_type: str = "call",
+    subject: str = "Follow-up call",
+) -> SimpleNamespace:
+    """Return a SimpleNamespace that looks like an Activity ORM object."""
+    now = datetime(2024, 1, 1, tzinfo=UTC)
+    return SimpleNamespace(
+        id=activity_id or uuid.uuid4(),
+        organization_id=org_id,
+        type=activity_type,
+        subject=subject,
+        description=None,
+        contact_id=None,
+        deal_id=None,
+        user_id=user_id,
+        scheduled_at=None,
+        completed_at=None,
+        created_at=now,
+    )
 
 
 # ---------------------------------------------------------------------------
-# Function-scoped: fresh rolled-back session per test
+# Shared mock session override
 # ---------------------------------------------------------------------------
 
 
-@pytest_asyncio.fixture
-async def db_session(create_test_tables: None) -> AsyncGenerator[AsyncSession, None]:
-    """
-    Provide a database session that is rolled back after each test.
-
-    Uses a SAVEPOINT so the outer transaction boundary stays open between
-    tests, giving near-zero per-test DB overhead.
-
-    Args:
-        create_test_tables: Ensures schema exists before this fixture runs.
-
-    Yields:
-        An ``AsyncSession`` that will be rolled back on cleanup.
-    """
-    async with TestingSessionFactory() as session:
-        async with session.begin():
-            yield session
-            await session.rollback()
+async def _mock_session() -> AsyncGenerator[AsyncMock, None]:
+    """Yield an AsyncMock in place of a real AsyncSession."""
+    yield AsyncMock(spec=AsyncSession)
 
 
-@pytest_asyncio.fixture
-async def client(db_session: AsyncSession) -> AsyncGenerator[AsyncClient, None]:
-    """
-    Provide an ``AsyncClient`` pointed at the FastAPI app with the test DB.
+# ---------------------------------------------------------------------------
+# App factory with mocked session
+# ---------------------------------------------------------------------------
 
-    The ``get_session`` dependency is overridden to yield the test session
-    so every HTTP request inside a test uses the same rolled-back transaction.
 
-    Args:
-        db_session: The function-scoped test session.
-
-    Yields:
-        ``AsyncClient`` ready for HTTP requests.
-    """
+def _build_app():
+    """Build a FastAPI app with the DB session dependency overridden."""
     app = create_app()
+    app.dependency_overrides[get_session] = _mock_session
+    return app
 
-    async def _override_get_session() -> AsyncGenerator[AsyncSession, None]:
-        yield db_session
 
-    app.dependency_overrides[get_session] = _override_get_session
+# ---------------------------------------------------------------------------
+# Client fixtures — one per role
+# ---------------------------------------------------------------------------
+
+
+@pytest_asyncio.fixture
+async def client_owner() -> AsyncGenerator[AsyncClient, None]:
+    """AsyncClient authenticated as an OWNER user."""
+    app = _build_app()
+    user = make_user(user_id=OWNER_ID, org_id=ORG_ID, role=UserRole.OWNER)
+
+    async def _current_user():
+        return user
+
+    app.dependency_overrides[get_current_user] = _current_user
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
         yield ac
 
 
+@pytest_asyncio.fixture
+async def client_admin() -> AsyncGenerator[AsyncClient, None]:
+    """AsyncClient authenticated as an ADMIN user."""
+    app = _build_app()
+    user = make_user(user_id=ADMIN_ID, org_id=ORG_ID, role=UserRole.ADMIN, email="admin@test.com")
+
+    async def _current_user():
+        return user
+
+    app.dependency_overrides[get_current_user] = _current_user
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        yield ac
+
+
+@pytest_asyncio.fixture
+async def client_rep() -> AsyncGenerator[AsyncClient, None]:
+    """AsyncClient authenticated as a SALES_REP user."""
+    app = _build_app()
+    user = make_user(user_id=REP_ID, org_id=ORG_ID, role=UserRole.SALES_REP, email="rep@test.com")
+
+    async def _current_user():
+        return user
+
+    app.dependency_overrides[get_current_user] = _current_user
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        yield ac
+
+
+@pytest_asyncio.fixture
+async def client_viewer() -> AsyncGenerator[AsyncClient, None]:
+    """AsyncClient authenticated as a VIEWER user."""
+    app = _build_app()
+    user = make_user(
+        user_id=VIEWER_ID, org_id=ORG_ID, role=UserRole.VIEWER, email="viewer@test.com"
+    )
+
+    async def _current_user():
+        return user
+
+    app.dependency_overrides[get_current_user] = _current_user
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        yield ac
+
+
+@pytest_asyncio.fixture
+async def client_no_auth() -> AsyncGenerator[AsyncClient, None]:
+    """AsyncClient with no auth override — real JWT validation applies (mocked session)."""
+    app = _build_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        yield ac
+
+
 # ---------------------------------------------------------------------------
-# Data fixtures
+# Token fixtures (for auth endpoint tests that handle tokens manually)
 # ---------------------------------------------------------------------------
 
 
-@pytest_asyncio.fixture
-async def org(db_session: AsyncSession) -> Organization:
-    """
-    Create and persist a test ``Organization``.
-
-    Args:
-        db_session: Injected test database session.
-
-    Returns:
-        Persisted ``Organization`` instance.
-    """
-    instance = Organization(
-        name="Test Org",
-        slug="test-org",
-        plan="free",
-        is_active=True,
-    )
-    db_session.add(instance)
-    await db_session.flush()
-    await db_session.refresh(instance)
-    return instance
+@pytest.fixture
+def owner_token() -> str:
+    """A valid access token for the owner user."""
+    return create_access_token(OWNER_ID, ORG_ID, UserRole.OWNER.value)
 
 
-@pytest_asyncio.fixture
-async def owner_user(db_session: AsyncSession, org: Organization) -> User:
-    """
-    Create and persist an ``owner`` user for the test organization.
-
-    Args:
-        db_session: Injected test database session.
-        org: The test organization fixture.
-
-    Returns:
-        Persisted ``User`` with role ``owner``.
-    """
-    from datetime import UTC, datetime
-
-    instance = User(
-        organization_id=org.id,
-        email="owner@test.com",
-        password_hash=hash_password("Password1"),
-        first_name="Test",
-        last_name="Owner",
-        role=UserRole.OWNER.value,
-        is_active=True,
-        created_at=datetime.now(UTC),
-    )
-    db_session.add(instance)
-    await db_session.flush()
-    await db_session.refresh(instance)
-    return instance
-
-
-@pytest_asyncio.fixture
-async def sales_rep_user(db_session: AsyncSession, org: Organization) -> User:
-    """
-    Create and persist a ``sales_rep`` user for the test organization.
-
-    Args:
-        db_session: Injected test database session.
-        org: The test organization fixture.
-
-    Returns:
-        Persisted ``User`` with role ``sales_rep``.
-    """
-    from datetime import UTC, datetime
-
-    instance = User(
-        organization_id=org.id,
-        email="rep@test.com",
-        password_hash=hash_password("Password1"),
-        first_name="Test",
-        last_name="Rep",
-        role=UserRole.SALES_REP.value,
-        is_active=True,
-        created_at=datetime.now(UTC),
-    )
-    db_session.add(instance)
-    await db_session.flush()
-    await db_session.refresh(instance)
-    return instance
-
-
-@pytest_asyncio.fixture
-def owner_token(owner_user: User) -> str:
-    """
-    Return a valid JWT access token for the owner user.
-
-    Args:
-        owner_user: The owner user fixture.
-
-    Returns:
-        Signed JWT string.
-    """
-    return create_access_token(owner_user.id, owner_user.organization_id, owner_user.role)
-
-
-@pytest_asyncio.fixture
-def sales_rep_token(sales_rep_user: User) -> str:
-    """
-    Return a valid JWT access token for the sales rep user.
-
-    Args:
-        sales_rep_user: The sales rep user fixture.
-
-    Returns:
-        Signed JWT string.
-    """
-    return create_access_token(
-        sales_rep_user.id, sales_rep_user.organization_id, sales_rep_user.role
-    )
-
-
-@pytest_asyncio.fixture
-def owner_headers(owner_token: str) -> dict[str, str]:
-    """Authorization headers dict for the owner user."""
-    return {"Authorization": f"Bearer {owner_token}"}
-
-
-@pytest_asyncio.fixture
-def rep_headers(sales_rep_token: str) -> dict[str, str]:
-    """Authorization headers dict for the sales rep user."""
-    return {"Authorization": f"Bearer {sales_rep_token}"}
+@pytest.fixture
+def owner_refresh_token() -> str:
+    """A valid refresh token for the owner user."""
+    return create_refresh_token(OWNER_ID, ORG_ID)
