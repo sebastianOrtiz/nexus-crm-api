@@ -5,7 +5,6 @@ Every other record in the CRM is scoped to an organization via
 ``organization_id``, making the data model strictly multi-tenant.
 """
 
-
 from sqlalchemy import Boolean, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 

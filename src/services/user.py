@@ -8,10 +8,12 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.core.constants import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE
+from src.api.v1.helpers import clamp_page_size
+from src.core.constants import DEFAULT_PAGE_SIZE
 from src.core.enums import UserRole
 from src.core.exceptions import ConflictError, ForbiddenError, NotFoundError
 from src.core.security import hash_password
+from src.core.utils import normalize_email
 from src.models.user import User
 from src.repositories.user import UserRepository
 from src.schemas.common import PaginatedResponse
@@ -47,12 +49,10 @@ class UserService:
         Returns:
             Paginated response envelope with ``UserResponse`` items.
         """
-        page_size = min(page_size, MAX_PAGE_SIZE)
+        page_size = clamp_page_size(page_size)
         offset = (page - 1) * page_size
 
-        users, total = await self._repo.list_by_org(
-            organization_id, offset=offset, limit=page_size
-        )
+        users, total = await self._repo.list_by_org(organization_id, offset=offset, limit=page_size)
         pages = math.ceil(total / page_size) if total else 1
         return PaginatedResponse(
             items=[UserResponse.model_validate(u) for u in users],
@@ -105,13 +105,13 @@ class UserService:
         if UserRole(current_user.role) not in (UserRole.OWNER, UserRole.ADMIN):
             raise ForbiddenError("Only owners and admins can add users")
 
-        existing = await self._repo.get_by_email(payload.email.lower())
+        existing = await self._repo.get_by_email(normalize_email(payload.email))
         if existing is not None:
             raise ConflictError(f"Email '{payload.email}' is already registered")
 
         return await self._repo.create(
             organization_id=organization_id,
-            email=payload.email.lower(),
+            email=normalize_email(payload.email),
             password_hash=hash_password(payload.password),
             first_name=payload.first_name,
             last_name=payload.last_name,

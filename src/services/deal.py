@@ -8,7 +8,8 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.core.constants import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE
+from src.api.v1.helpers import clamp_page_size
+from src.core.constants import DEFAULT_PAGE_SIZE
 from src.core.enums import UserRole
 from src.core.exceptions import ForbiddenError, NotFoundError
 from src.models.deal import Deal
@@ -77,7 +78,7 @@ class DealService:
         Returns:
             Paginated response envelope.
         """
-        page_size = min(page_size, MAX_PAGE_SIZE)
+        page_size = clamp_page_size(page_size)
         offset = (page - 1) * page_size
 
         assigned_filter: UUID | None = None

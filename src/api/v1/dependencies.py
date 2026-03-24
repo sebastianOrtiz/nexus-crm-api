@@ -22,7 +22,7 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.core.constants import BEARER_PREFIX
+from src.core.constants import BEARER_PREFIX, JWT_CLAIM_SUB
 from src.core.database import get_session
 from src.core.enums import UserRole
 from src.core.exceptions import UnauthorizedError
@@ -37,9 +37,7 @@ from src.repositories.user import UserRepository
 DBSession = Annotated[AsyncSession, Depends(get_session)]
 
 _bearer_scheme = HTTPBearer(auto_error=False)
-_BearerCredentials = Annotated[
-    HTTPAuthorizationCredentials | None, Depends(_bearer_scheme)
-]
+_BearerCredentials = Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer_scheme)]
 
 
 # ---------------------------------------------------------------------------
@@ -106,7 +104,7 @@ async def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         ) from exc
 
-    user_id: str | None = payload.get("sub")
+    user_id: str | None = payload.get(JWT_CLAIM_SUB)
     if not user_id:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

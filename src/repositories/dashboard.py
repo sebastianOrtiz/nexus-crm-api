@@ -72,17 +72,13 @@ class DashboardRepository:
 
         # Contact count
         contact_count_result = await self.session.execute(
-            select(func.count(Contact.id)).where(
-                Contact.organization_id == organization_id
-            )
+            select(func.count(Contact.id)).where(Contact.organization_id == organization_id)
         )
         total_contacts: int = contact_count_result.scalar_one()
 
         # Company count
         company_count_result = await self.session.execute(
-            select(func.count(Company.id)).where(
-                Company.organization_id == organization_id
-            )
+            select(func.count(Company.id)).where(Company.organization_id == organization_id)
         )
         total_companies: int = company_count_result.scalar_one()
 
@@ -95,9 +91,7 @@ class DashboardRepository:
             "total_companies": total_companies,
         }
 
-    async def get_revenue_by_month(
-        self, organization_id: UUID, months: int = 6
-    ) -> list[dict]:
+    async def get_revenue_by_month(self, organization_id: UUID, months: int = 6) -> list[dict]:
         """
         Revenue aggregated by calendar month for the past N months.
 

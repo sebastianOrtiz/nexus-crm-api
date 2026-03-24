@@ -70,7 +70,11 @@ async def get_session() -> AsyncGenerator[AsyncSession, None]:
         try:
             yield session
             await session.commit()
-        except Exception:
+        except Exception:  # noqa: BLE001 — intentionally broad: rollback on ANY error
+            # We want to rollback for any exception type, not just SQLAlchemy
+            # errors.  Application-level exceptions (e.g. validation errors
+            # raised by a service) must also cause a rollback so the session
+            # is never left in a dirty state.
             await session.rollback()
             raise
         finally:

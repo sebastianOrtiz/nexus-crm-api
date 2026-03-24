@@ -11,6 +11,7 @@ El override de ``get_session`` garantiza que cada request HTTP del cliente de te
 usa la misma sesión rolled-back, así ningún test contamina al siguiente.
 """
 
+import os
 from collections.abc import AsyncGenerator
 
 import pytest_asyncio
@@ -35,8 +36,9 @@ from src.models.user import User
 # Test database
 # ---------------------------------------------------------------------------
 
-TEST_DATABASE_URL = (
-    "postgresql+asyncpg://postgres:postgres@localhost:5432/nexuscrm_test"
+TEST_DATABASE_URL = os.environ.get(
+    "TEST_DATABASE_URL",
+    "postgresql+asyncpg://postgres:postgres@localhost:5432/nexuscrm_test",
 )
 
 test_engine = create_async_engine(TEST_DATABASE_URL, poolclass=NullPool, echo=False)
@@ -119,9 +121,7 @@ async def client(db_session: AsyncSession) -> AsyncGenerator[AsyncClient, None]:
 
     app.dependency_overrides[get_session] = _override_get_session
 
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as ac:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
         yield ac
 
 

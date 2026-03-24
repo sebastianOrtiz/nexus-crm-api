@@ -51,7 +51,9 @@ async def update_me(
         first_name=payload.first_name,
         last_name=payload.last_name,
     )
-    user = await svc.update_user(current_user.id, update_payload, current_user.organization_id, current_user)
+    user = await svc.update_user(
+        current_user.id, update_payload, current_user.organization_id, current_user
+    )
     return UserResponse.model_validate(user)
 
 

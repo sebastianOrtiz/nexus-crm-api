@@ -88,10 +88,12 @@ class ActivityRepository(BaseRepository[Activity]):
             List of ``Activity`` instances ordered by creation date.
         """
         result = await self.session.execute(
-            select(Activity).where(
+            select(Activity)
+            .where(
                 Activity.contact_id == contact_id,
                 Activity.organization_id == organization_id,
-            ).order_by(Activity.created_at.desc())
+            )
+            .order_by(Activity.created_at.desc())
         )
         return list(result.scalars().all())
 

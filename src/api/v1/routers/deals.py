@@ -153,9 +153,7 @@ async def update_deal(
     """
     svc = DealService(session)
     try:
-        deal = await svc.update_deal(
-            deal_id, payload, current_user.organization_id, current_user
-        )
+        deal = await svc.update_deal(deal_id, payload, current_user.organization_id, current_user)
     except ForbiddenError as exc:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
     except NotFoundError as exc:
@@ -195,9 +193,7 @@ async def move_deal_stage(
     """
     svc = DealService(session)
     try:
-        deal = await svc.move_stage(
-            deal_id, payload, current_user.organization_id, current_user
-        )
+        deal = await svc.move_stage(deal_id, payload, current_user.organization_id, current_user)
     except ForbiddenError as exc:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
     except NotFoundError as exc:

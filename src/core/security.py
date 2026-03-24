@@ -15,7 +15,15 @@ from jose import ExpiredSignatureError, JWTError, jwt
 from passlib.context import CryptContext
 
 from src.core.config import settings
-from src.core.constants import JWT_ALGORITHM
+from src.core.constants import (
+    JWT_ALGORITHM,
+    JWT_CLAIM_EXP,
+    JWT_CLAIM_IAT,
+    JWT_CLAIM_ORG,
+    JWT_CLAIM_ROLE,
+    JWT_CLAIM_SUB,
+    JWT_CLAIM_TYPE,
+)
 from src.core.enums import TokenType
 from src.core.exceptions import UnauthorizedError
 
@@ -84,12 +92,12 @@ def create_access_token(
     """
     expire = _now_utc() + timedelta(minutes=settings.JWT_ACCESS_TOKEN_EXPIRE_MINUTES)
     payload = {
-        "sub": str(user_id),
-        "org": str(organization_id),
-        "role": role,
-        "type": TokenType.ACCESS.value,
-        "exp": expire,
-        "iat": _now_utc(),
+        JWT_CLAIM_SUB: str(user_id),
+        JWT_CLAIM_ORG: str(organization_id),
+        JWT_CLAIM_ROLE: role,
+        JWT_CLAIM_TYPE: TokenType.ACCESS.value,
+        JWT_CLAIM_EXP: expire,
+        JWT_CLAIM_IAT: _now_utc(),
     }
     return jwt.encode(payload, settings.JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
 
@@ -110,11 +118,11 @@ def create_refresh_token(user_id: UUID, organization_id: UUID) -> str:
     """
     expire = _now_utc() + timedelta(days=settings.JWT_REFRESH_TOKEN_EXPIRE_DAYS)
     payload = {
-        "sub": str(user_id),
-        "org": str(organization_id),
-        "type": TokenType.REFRESH.value,
-        "exp": expire,
-        "iat": _now_utc(),
+        JWT_CLAIM_SUB: str(user_id),
+        JWT_CLAIM_ORG: str(organization_id),
+        JWT_CLAIM_TYPE: TokenType.REFRESH.value,
+        JWT_CLAIM_EXP: expire,
+        JWT_CLAIM_IAT: _now_utc(),
     }
     return jwt.encode(payload, settings.JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
 
@@ -155,7 +163,7 @@ def decode_access_token(token: str) -> dict:
         UnauthorizedError: If the token is invalid or is not an access token.
     """
     payload = decode_token(token)
-    if payload.get("type") != TokenType.ACCESS.value:
+    if payload.get(JWT_CLAIM_TYPE) != TokenType.ACCESS.value:
         raise UnauthorizedError("Invalid token type")
     return payload
 
@@ -174,6 +182,6 @@ def decode_refresh_token(token: str) -> dict:
         UnauthorizedError: If the token is invalid or is not a refresh token.
     """
     payload = decode_token(token)
-    if payload.get("type") != TokenType.REFRESH.value:
+    if payload.get(JWT_CLAIM_TYPE) != TokenType.REFRESH.value:
         raise UnauthorizedError("Invalid token type")
     return payload

@@ -33,7 +33,7 @@ class TestRegister:
         data = response.json()
         assert "access_token" in data
         assert "refresh_token" in data
-        assert data["token_type"] == "bearer"
+        assert data["token_type"] == "bearer"  # noqa: S105
 
     async def test_register_duplicate_slug(self, client: AsyncClient) -> None:
         """A duplicate slug returns 409 Conflict."""
@@ -178,9 +178,7 @@ class TestRefresh:
         )
         refresh_token = reg.json()["refresh_token"]
 
-        response = await client.post(
-            "/api/v1/auth/refresh", json={"refresh_token": refresh_token}
-        )
+        response = await client.post("/api/v1/auth/refresh", json={"refresh_token": refresh_token})
         assert response.status_code == 200
         assert "access_token" in response.json()
 
@@ -198,7 +196,5 @@ class TestLogout:
 
     async def test_logout_returns_204(self, client: AsyncClient) -> None:
         """Logout always returns 204 (stateless — token discarded client-side)."""
-        response = await client.post(
-            "/api/v1/auth/logout", json={"refresh_token": "any-token"}
-        )
+        response = await client.post("/api/v1/auth/logout", json={"refresh_token": "any-token"})
         assert response.status_code == 204

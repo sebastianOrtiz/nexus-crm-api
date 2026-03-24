@@ -14,6 +14,7 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.core.constants import JWT_CLAIM_ORG, JWT_CLAIM_SUB
 from src.core.enums import OrganizationPlan, UserRole
 from src.core.exceptions import ConflictError, UnauthorizedError
 from src.core.security import (
@@ -23,6 +24,7 @@ from src.core.security import (
     hash_password,
     verify_password,
 )
+from src.core.utils import normalize_email
 from src.models.organization import Organization
 from src.models.user import User
 from src.repositories.organization import OrganizationRepository
@@ -61,9 +63,7 @@ class AuthService:
         """
         # Guard: unique slug
         if await self._org_repo.get_by_slug(payload.organization_slug):
-            raise ConflictError(
-                f"Organization slug '{payload.organization_slug}' is already taken"
-            )
+            raise ConflictError(f"Organization slug '{payload.organization_slug}' is already taken")
 
         # Guard: unique email (globally — email is unique across all tenants)
         if await self._user_repo.get_by_email(payload.email):
@@ -80,7 +80,7 @@ class AuthService:
         # Create owner user
         user: User = await self._user_repo.create(
             organization_id=org.id,
-            email=payload.email.lower(),
+            email=normalize_email(payload.email),
             password_hash=hash_password(payload.password),
             first_name=payload.first_name,
             last_name=payload.last_name,
@@ -109,7 +109,7 @@ class AuthService:
             UnauthorizedError: If credentials are invalid or the account is
                 inactive.
         """
-        user = await self._user_repo.get_by_email(email.lower())
+        user = await self._user_repo.get_by_email(normalize_email(email))
 
         # Use the same generic error for both "not found" and "wrong password"
         # to avoid user enumeration attacks.
@@ -140,8 +140,8 @@ class AuthService:
                 the user no longer exists.
         """
         payload = decode_refresh_token(refresh_token)
-        user_id = UUID(payload["sub"])
-        org_id = UUID(payload["org"])
+        user_id = UUID(payload[JWT_CLAIM_SUB])
+        org_id = UUID(payload[JWT_CLAIM_ORG])
 
         user = await self._user_repo.get_by_id(user_id)
         if user is None or not user.is_active:

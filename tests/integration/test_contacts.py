@@ -86,9 +86,7 @@ class TestListContacts:
         data = response.json()
         # All returned contacts should be assigned to the rep
         for item in data["items"]:
-            assert item["assignedToId"] is None or item["assignedToId"] == str(
-                sales_rep_user.id
-            )
+            assert item["assignedToId"] is None or item["assignedToId"] == str(sales_rep_user.id)
 
     async def test_list_requires_auth(self, client: AsyncClient) -> None:
         """Unauthenticated request returns 401."""
@@ -262,15 +260,11 @@ class TestDeleteContact:
     ) -> None:
         """Owner can delete any contact."""
         contact = await _make_contact(db_session, org, first_name="ToDelete")
-        response = await client.delete(
-            f"/api/v1/contacts/{contact.id}", headers=owner_headers
-        )
+        response = await client.delete(f"/api/v1/contacts/{contact.id}", headers=owner_headers)
         assert response.status_code == 204
 
         # Verify it's gone
-        get_response = await client.get(
-            f"/api/v1/contacts/{contact.id}", headers=owner_headers
-        )
+        get_response = await client.get(f"/api/v1/contacts/{contact.id}", headers=owner_headers)
         assert get_response.status_code == 404
 
     async def test_sales_rep_cannot_delete_contact(
@@ -282,7 +276,5 @@ class TestDeleteContact:
     ) -> None:
         """Sales reps cannot delete contacts."""
         contact = await _make_contact(db_session, org, first_name="Protected")
-        response = await client.delete(
-            f"/api/v1/contacts/{contact.id}", headers=rep_headers
-        )
+        response = await client.delete(f"/api/v1/contacts/{contact.id}", headers=rep_headers)
         assert response.status_code == 403

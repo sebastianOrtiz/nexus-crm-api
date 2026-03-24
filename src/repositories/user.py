@@ -6,6 +6,7 @@ from uuid import UUID
 
 from sqlalchemy import func, select
 
+from src.core.utils import normalize_email
 from src.models.user import User
 from src.repositories.base import BaseRepository
 
@@ -33,7 +34,7 @@ class UserRepository(BaseRepository[User]):
             The matching user or ``None``.
         """
         result = await self.session.execute(
-            select(User).where(func.lower(User.email) == email.lower())
+            select(User).where(func.lower(User.email) == normalize_email(email))
         )
         return result.scalar_one_or_none()
 
@@ -50,7 +51,7 @@ class UserRepository(BaseRepository[User]):
         """
         result = await self.session.execute(
             select(User).where(
-                func.lower(User.email) == email.lower(),
+                func.lower(User.email) == normalize_email(email),
                 User.organization_id == organization_id,
             )
         )

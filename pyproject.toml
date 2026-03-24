@@ -59,9 +59,18 @@ filterwarnings = [
 line-length = 100
 target-version = "py312"
 
+[tool.ruff.format]
+quote-style = "double"
+
 [tool.ruff.lint]
-select = ["E", "F", "I", "N", "W", "UP"]
-ignore = ["E501"]
+select = ["E", "F", "I", "N", "W", "UP", "B", "S", "C90"]
+ignore = [
+    "S101",   # allow assert statements (used in tests)
+    "B008",   # allow Query()/Depends() in FastAPI function signatures — this is idiomatic FastAPI
+]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
 
 [tool.mypy]
 python_version = "3.12"

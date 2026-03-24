@@ -54,9 +54,7 @@ class BaseRepository(Generic[ModelT]):
         Returns:
             The ORM instance if found, ``None`` otherwise.
         """
-        result = await self.session.execute(
-            select(self.model).where(self.model.id == record_id)
-        )
+        result = await self.session.execute(select(self.model).where(self.model.id == record_id))
         return result.scalar_one_or_none()
 
     async def get_by_id_and_org(

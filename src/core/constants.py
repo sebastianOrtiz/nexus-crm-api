@@ -18,6 +18,14 @@ REFRESH_TOKEN_EXPIRE_DAYS: int = 7
 JWT_ALGORITHM: str = "HS256"
 """Algorithm used to sign JWTs."""
 
+# JWT payload keys
+JWT_CLAIM_SUB = "sub"
+JWT_CLAIM_ORG = "org"
+JWT_CLAIM_ROLE = "role"
+JWT_CLAIM_TYPE = "type"
+JWT_CLAIM_EXP = "exp"
+JWT_CLAIM_IAT = "iat"
+
 # ---------------------------------------------------------------------------
 # Pagination
 # ---------------------------------------------------------------------------

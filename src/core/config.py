@@ -76,7 +76,7 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     # Server
     # ------------------------------------------------------------------
-    HOST: str = "0.0.0.0"
+    HOST: str = "0.0.0.0"  # noqa: S104 — intentional: listens on all interfaces inside Docker
     PORT: int = 8000
     WORKERS: int = 1
 

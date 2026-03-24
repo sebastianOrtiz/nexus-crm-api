@@ -28,7 +28,5 @@ class OrganizationRepository(BaseRepository[Organization]):
         Returns:
             The matching organization or ``None``.
         """
-        result = await self.session.execute(
-            select(Organization).where(Organization.slug == slug)
-        )
+        result = await self.session.execute(select(Organization).where(Organization.slug == slug))
         return result.scalar_one_or_none()
