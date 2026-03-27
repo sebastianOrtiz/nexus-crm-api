@@ -17,8 +17,10 @@ from passlib.context import CryptContext
 from src.core.config import settings
 from src.core.constants import (
     JWT_ALGORITHM,
+    JWT_CLAIM_EMAIL,
     JWT_CLAIM_EXP,
     JWT_CLAIM_IAT,
+    JWT_CLAIM_NAME,
     JWT_CLAIM_ORG,
     JWT_CLAIM_ROLE,
     JWT_CLAIM_SUB,
@@ -75,17 +77,21 @@ def create_access_token(
     user_id: UUID,
     organization_id: UUID,
     role: str,
+    email: str,
+    name: str = "",
 ) -> str:
     """
     Create a short-lived JWT access token.
 
     The payload contains ``sub`` (user ID), ``org`` (organization ID),
-    ``role``, ``type``, and ``exp``.
+    ``role``, ``email``, ``name``, ``type``, and ``exp``.
 
     Args:
         user_id: UUID of the authenticated user.
         organization_id: UUID of the user's organization (tenant).
         role: The user's role string (e.g., ``"owner"``).
+        email: The user's email address.
+        name: The user's display name.
 
     Returns:
         Signed JWT string.
@@ -95,6 +101,8 @@ def create_access_token(
         JWT_CLAIM_SUB: str(user_id),
         JWT_CLAIM_ORG: str(organization_id),
         JWT_CLAIM_ROLE: role,
+        JWT_CLAIM_EMAIL: email,
+        JWT_CLAIM_NAME: name,
         JWT_CLAIM_TYPE: TokenType.ACCESS.value,
         JWT_CLAIM_EXP: expire,
         JWT_CLAIM_IAT: _now_utc(),

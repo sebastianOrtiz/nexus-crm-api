@@ -90,7 +90,9 @@ class AuthService:
         )
 
         return TokenResponse(
-            access_token=create_access_token(user.id, org.id, user.role),
+            access_token=create_access_token(
+                user.id, org.id, user.role, user.email, f"{user.first_name} {user.last_name}"
+            ),
             refresh_token=create_refresh_token(user.id, org.id),
         )
 
@@ -120,7 +122,13 @@ class AuthService:
             raise UnauthorizedError("Account is deactivated")
 
         return TokenResponse(
-            access_token=create_access_token(user.id, user.organization_id, user.role),
+            access_token=create_access_token(
+                user.id,
+                user.organization_id,
+                user.role,
+                user.email,
+                f"{user.first_name} {user.last_name}",
+            ),
             refresh_token=create_refresh_token(user.id, user.organization_id),
         )
 
@@ -148,6 +156,8 @@ class AuthService:
             raise UnauthorizedError("User not found or deactivated")
 
         return TokenResponse(
-            access_token=create_access_token(user.id, org_id, user.role),
+            access_token=create_access_token(
+                user.id, org_id, user.role, user.email, f"{user.first_name} {user.last_name}"
+            ),
             refresh_token=create_refresh_token(user.id, org_id),
         )

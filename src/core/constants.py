@@ -23,6 +23,8 @@ JWT_CLAIM_SUB = "sub"
 JWT_CLAIM_ORG = "org"
 JWT_CLAIM_ROLE = "role"
 JWT_CLAIM_TYPE = "type"
+JWT_CLAIM_EMAIL = "email"
+JWT_CLAIM_NAME = "name"
 JWT_CLAIM_EXP = "exp"
 JWT_CLAIM_IAT = "iat"
 
