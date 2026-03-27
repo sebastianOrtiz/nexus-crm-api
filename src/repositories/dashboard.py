@@ -102,9 +102,10 @@ class DashboardRepository:
         Returns:
             List of dicts with keys: ``period``, ``revenue``, ``deal_count``.
         """
+        period_expr = func.to_char(Deal.closed_at, "YYYY-MM")
         result = await self.session.execute(
             select(
-                func.to_char(Deal.closed_at, "YYYY-MM").label("period"),
+                period_expr.label("period"),
                 func.coalesce(func.sum(Deal.value), 0).label("revenue"),
                 func.count(Deal.id).label("deal_count"),
             )
@@ -114,8 +115,8 @@ class DashboardRepository:
                 PipelineStage.is_won.is_(True),
                 Deal.closed_at.isnot(None),
             )
-            .group_by(func.to_char(Deal.closed_at, "YYYY-MM"))
-            .order_by(func.to_char(Deal.closed_at, "YYYY-MM").desc())
+            .group_by(period_expr)
+            .order_by(period_expr.desc())
             .limit(months)
         )
         return [row._asdict() for row in result.all()]
