@@ -20,6 +20,7 @@ class ContactRepository(BaseRepository[Contact]):
         organization_id: UUID,
         *,
         search: str | None = None,
+        source: str | None = None,
         company_id: UUID | None = None,
         assigned_to_id: UUID | None = None,
         offset: int = 0,
@@ -50,6 +51,8 @@ class ContactRepository(BaseRepository[Contact]):
                     Contact.email.ilike(pattern),
                 )
             )
+        if source is not None:
+            base_q = base_q.where(Contact.source == source)
         if company_id is not None:
             base_q = base_q.where(Contact.company_id == company_id)
         if assigned_to_id is not None:

@@ -61,6 +61,7 @@ class ContactService:
         current_user: User,
         *,
         search: str | None = None,
+        source: str | None = None,
         company_id: UUID | None = None,
         page: int = 1,
         page_size: int = DEFAULT_PAGE_SIZE,
@@ -92,6 +93,7 @@ class ContactService:
         contacts, total = await self._repo.list_by_org(
             organization_id,
             search=search,
+            source=source,
             company_id=company_id,
             assigned_to_id=assigned_filter,
             offset=offset,

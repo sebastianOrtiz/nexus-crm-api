@@ -7,6 +7,7 @@ from uuid import UUID
 from fastapi import APIRouter, HTTPException, Query, status
 
 from src.api.v1.dependencies import CurrentUser, DBSession
+from src.core.enums import ContactSource
 from src.core.exceptions import ForbiddenError, NotFoundError
 from src.schemas.activity import ActivityResponse
 from src.schemas.common import PaginatedResponse
@@ -25,6 +26,7 @@ async def list_contacts(
     current_user: CurrentUser,
     session: DBSession,
     search: str | None = Query(default=None),
+    source: ContactSource | None = Query(default=None),
     company_id: UUID | None = Query(default=None),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100),
@@ -50,6 +52,7 @@ async def list_contacts(
         current_user.organization_id,
         current_user,
         search=search,
+        source=source.value if source else None,
         company_id=company_id,
         page=page,
         page_size=page_size,
