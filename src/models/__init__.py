@@ -10,6 +10,7 @@ from src.models.base import Base
 from src.models.company import Company
 from src.models.contact import Contact
 from src.models.deal import Deal
+from src.models.deal_stage_history import DealStageHistory
 from src.models.organization import Organization
 from src.models.pipeline_stage import PipelineStage
 from src.models.user import User
@@ -22,5 +23,6 @@ __all__ = [
     "Contact",
     "PipelineStage",
     "Deal",
+    "DealStageHistory",
     "Activity",
 ]

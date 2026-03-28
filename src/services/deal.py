@@ -6,6 +6,7 @@ import math
 from datetime import UTC, datetime
 from uuid import UUID
 
+from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.v1.helpers import clamp_page_size
@@ -13,6 +14,7 @@ from src.core.constants import DEFAULT_PAGE_SIZE
 from src.core.enums import UserRole
 from src.core.exceptions import ForbiddenError, NotFoundError
 from src.models.deal import Deal
+from src.models.deal_stage_history import DealStageHistory
 from src.models.user import User
 from src.repositories.deal import DealRepository
 from src.repositories.pipeline_stage import PipelineStageRepository
@@ -32,6 +34,7 @@ class DealService:
     """
 
     def __init__(self, session: AsyncSession) -> None:
+        self._session = session
         self._repo = DealRepository(session)
         self._stage_repo = PipelineStageRepository(session)
 
@@ -154,7 +157,21 @@ class DealService:
         if data.get("currency"):
             data["currency"] = data["currency"].value
 
-        return await self._repo.create(organization_id=organization_id, **data)
+        deal = await self._repo.create(organization_id=organization_id, **data)
+
+        now = datetime.now(UTC)
+        self._session.add(
+            DealStageHistory(
+                deal_id=deal.id,
+                stage_id=deal.stage_id,
+                moved_by_id=current_user.id,
+                entered_at=now,
+                exited_at=None,
+            )
+        )
+        await self._session.flush()
+
+        return deal
 
     async def update_deal(
         self,
@@ -187,6 +204,8 @@ class DealService:
 
         changes = payload.model_dump(exclude_none=True)
 
+        stage_changed = "stage_id" in changes and changes["stage_id"] != deal.stage_id
+
         if "stage_id" in changes:
             stage = await self._stage_repo.get_by_id_and_org(changes["stage_id"], organization_id)
             if stage is None:
@@ -201,7 +220,32 @@ class DealService:
         if not changes:
             return deal
 
-        return await self._repo.update(deal, **changes)
+        updated_deal = await self._repo.update(deal, **changes)
+
+        if stage_changed:
+            now = datetime.now(UTC)
+            # Close the current open history entry
+            await self._session.execute(
+                sa_update(DealStageHistory)
+                .where(
+                    DealStageHistory.deal_id == updated_deal.id,
+                    DealStageHistory.exited_at.is_(None),
+                )
+                .values(exited_at=now)
+            )
+            # Open a new history entry for the new stage
+            self._session.add(
+                DealStageHistory(
+                    deal_id=updated_deal.id,
+                    stage_id=updated_deal.stage_id,
+                    moved_by_id=current_user.id,
+                    entered_at=now,
+                    exited_at=None,
+                )
+            )
+            await self._session.flush()
+
+        return updated_deal
 
     async def move_stage(
         self,

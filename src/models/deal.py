@@ -115,6 +115,27 @@ class Deal(UUIDMixin, TimestampMixin, Base):
         back_populates="deal",
         lazy="noload",
     )
+    stage_history: Mapped[list["DealStageHistory"]] = relationship(  # type: ignore[name-defined]  # noqa: F821
+        "DealStageHistory",
+        back_populates="deal",
+        lazy="noload",
+        order_by="DealStageHistory.entered_at",
+    )
+
+    @property
+    def stage_name(self) -> str:
+        """Name of the current pipeline stage, if loaded."""
+        return self.stage.name if self.stage else ""
+
+    @property
+    def status(self) -> str:
+        """Derived status: 'won', 'lost', or 'open' based on the current stage."""
+        if self.stage:
+            if self.stage.is_won:
+                return "won"
+            if self.stage.is_lost:
+                return "lost"
+        return "open"
 
     def __repr__(self) -> str:
         return f"<Deal id={self.id} title={self.title!r} value={self.value}>"
