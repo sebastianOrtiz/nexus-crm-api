@@ -30,6 +30,7 @@ from src.models.user import User
 from src.repositories.organization import OrganizationRepository
 from src.repositories.user import UserRepository
 from src.schemas.auth import RegisterRequest, TokenResponse
+from src.services.onboarding import trigger_onboarding
 
 
 class AuthService:
@@ -87,6 +88,13 @@ class AuthService:
             role=UserRole.OWNER.value,
             is_active=True,
             created_at=datetime.now(UTC),
+        )
+
+        # Fire-and-forget: trigger the async onboarding flow.
+        await trigger_onboarding(
+            email=user.email,
+            name=f"{user.first_name} {user.last_name}",
+            org_name=org.name,
         )
 
         return TokenResponse(

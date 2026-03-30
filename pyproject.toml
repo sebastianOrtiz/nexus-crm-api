@@ -27,6 +27,9 @@ dependencies = [
     "passlib[bcrypt]==1.7.4",
     "python-jose[cryptography]==3.3.0",
 
+    # HTTP client (event service integration)
+    "httpx==0.28.1",
+
     # Utilities
     "python-multipart==0.0.20",
 ]

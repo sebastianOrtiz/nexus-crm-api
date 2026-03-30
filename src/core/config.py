@@ -74,6 +74,11 @@ class Settings(BaseSettings):
     BCRYPT_ROUNDS: int = BCRYPT_ROUNDS
 
     # ------------------------------------------------------------------
+    # Event-Driven Service
+    # ------------------------------------------------------------------
+    EVENT_SERVICE_URL: str = "http://localhost:8081"
+
+    # ------------------------------------------------------------------
     # Server
     # ------------------------------------------------------------------
     HOST: str = "0.0.0.0"  # noqa: S104 — intentional: listens on all interfaces inside Docker
