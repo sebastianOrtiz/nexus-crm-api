@@ -14,6 +14,7 @@ from src.api.v1.routers.companies import router as companies_router
 from src.api.v1.routers.contacts import router as contacts_router
 from src.api.v1.routers.dashboard import router as dashboard_router
 from src.api.v1.routers.deals import router as deals_router
+from src.api.v1.routers.events import router as events_router
 from src.api.v1.routers.organization import router as organization_router
 from src.api.v1.routers.pipeline_stages import router as pipeline_stages_router
 from src.api.v1.routers.users import router as users_router
@@ -29,3 +30,4 @@ v1_router.include_router(pipeline_stages_router)
 v1_router.include_router(deals_router)
 v1_router.include_router(activities_router)
 v1_router.include_router(dashboard_router)
+v1_router.include_router(events_router)
