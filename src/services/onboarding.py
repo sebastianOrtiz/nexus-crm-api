@@ -15,6 +15,7 @@ from src.core.config import settings
 logger = logging.getLogger("nexuscrm.onboarding")
 
 TRIGGER_PATH = "/api/v1/onboarding/trigger"
+API_KEY_HEADER = "X-API-Key"
 TIMEOUT_SECONDS = 5
 
 
@@ -41,9 +42,11 @@ async def trigger_onboarding(
         "orgName": org_name,
     }
 
+    headers = {API_KEY_HEADER: settings.EVENT_SERVICE_API_KEY}
+
     try:
         async with httpx.AsyncClient(timeout=TIMEOUT_SECONDS) as client:
-            response = await client.post(url, json=payload)
+            response = await client.post(url, json=payload, headers=headers)
 
         if response.status_code in (200, 201, 202):
             data = response.json()

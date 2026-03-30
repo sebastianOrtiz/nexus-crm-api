@@ -19,6 +19,7 @@ logger = logging.getLogger("nexuscrm.events")
 
 router = APIRouter(prefix="/events", tags=["events"])
 
+API_KEY_HEADER = "X-API-Key"
 TIMEOUT_SECONDS = 5
 
 
@@ -33,9 +34,10 @@ async def _proxy_get(path: str) -> list[dict[str, Any]]:
         The parsed JSON response as a list, or an empty list on failure.
     """
     url = f"{settings.EVENT_SERVICE_URL}{path}"
+    headers = {API_KEY_HEADER: settings.EVENT_SERVICE_API_KEY}
     try:
         async with httpx.AsyncClient(timeout=TIMEOUT_SECONDS) as client:
-            response = await client.get(url)
+            response = await client.get(url, headers=headers)
 
         if response.status_code == 200:
             return response.json()  # type: ignore[no-any-return]
