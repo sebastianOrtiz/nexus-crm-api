@@ -52,12 +52,14 @@ class TestJWT:
         """Access token payload contains expected keys."""
         user_id = uuid4()
         org_id = uuid4()
-        token = create_access_token(user_id, org_id, UserRole.OWNER.value)
+        token = create_access_token(user_id, org_id, UserRole.OWNER.value, "test@test.com", "Test User")
         payload = decode_access_token(token)
 
         assert payload["sub"] == str(user_id)
         assert payload["org"] == str(org_id)
         assert payload["role"] == UserRole.OWNER.value
+        assert payload["email"] == "test@test.com"
+        assert payload["name"] == "Test User"
         assert payload["type"] == TokenType.ACCESS.value
 
     def test_refresh_token_payload(self) -> None:
@@ -80,7 +82,7 @@ class TestJWT:
 
     def test_decode_refresh_token_rejects_access_token(self) -> None:
         """``decode_refresh_token`` raises when given an access token."""
-        token = create_access_token(uuid4(), uuid4(), UserRole.ADMIN.value)
+        token = create_access_token(uuid4(), uuid4(), UserRole.ADMIN.value, "a@b.com")
         with pytest.raises(UnauthorizedError):
             decode_refresh_token(token)
 
@@ -91,7 +93,7 @@ class TestJWT:
 
     def test_tampered_signature_raises_unauthorized(self) -> None:
         """Modifying the signature part raises ``UnauthorizedError``."""
-        token = create_access_token(uuid4(), uuid4(), UserRole.OWNER.value)
+        token = create_access_token(uuid4(), uuid4(), UserRole.OWNER.value, "a@b.com")
         parts = token.split(".")
         tampered = f"{parts[0]}.{parts[1]}.invalidsignature"
         with pytest.raises(UnauthorizedError):
