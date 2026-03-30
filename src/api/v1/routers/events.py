@@ -23,15 +23,12 @@ API_KEY_HEADER = "X-API-Key"
 TIMEOUT_SECONDS = 5
 
 
-async def _proxy_get(path: str) -> list[dict[str, Any]]:
+async def _proxy_get(path: str) -> dict[str, Any]:
     """
     Forward a GET request to the event service and return parsed JSON.
 
-    Args:
-        path: The path to append to EVENT_SERVICE_URL.
-
     Returns:
-        The parsed JSON response as a list, or an empty list on failure.
+        The parsed JSON response, or a dict with empty lists on failure.
     """
     url = f"{settings.EVENT_SERVICE_URL}{path}"
     headers = {API_KEY_HEADER: settings.EVENT_SERVICE_API_KEY}
@@ -47,47 +44,20 @@ async def _proxy_get(path: str) -> list[dict[str, Any]]:
             extra={"status_code": response.status_code, "path": path},
         )
     except httpx.ConnectError:
-        logger.warning(
-            "Event service unavailable",
-            extra={"url": url},
-        )
+        logger.warning("Event service unavailable", extra={"url": url})
     except Exception:
         logger.exception("Unexpected error proxying to event service")
 
-    return []
+    return {}
 
 
-@router.get(
-    "/flows",
-    summary="List onboarding flows",
-    response_model=list[dict[str, Any]],
-)
-async def get_flows(current_user: CurrentUser) -> list[dict[str, Any]]:
-    """
-    Proxy to the event service to retrieve all onboarding flows.
-
-    Args:
-        current_user: Injected authenticated user (any role).
-
-    Returns:
-        List of onboarding flow objects.
-    """
+@router.get("/flows", summary="List onboarding flows")
+async def get_flows(current_user: CurrentUser) -> dict[str, Any]:
+    """Proxy to the event service to retrieve all onboarding flows."""
     return await _proxy_get("/api/v1/onboarding")
 
 
-@router.get(
-    "/all",
-    summary="List all onboarding events",
-    response_model=list[dict[str, Any]],
-)
-async def get_all_events(current_user: CurrentUser) -> list[dict[str, Any]]:
-    """
-    Proxy to the event service to retrieve all onboarding events.
-
-    Args:
-        current_user: Injected authenticated user (any role).
-
-    Returns:
-        List of onboarding event objects.
-    """
+@router.get("/all", summary="List all onboarding events")
+async def get_all_events(current_user: CurrentUser) -> dict[str, Any]:
+    """Proxy to the event service to retrieve all onboarding events."""
     return await _proxy_get("/api/v1/onboarding/events")
