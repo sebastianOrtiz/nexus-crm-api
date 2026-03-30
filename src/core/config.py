@@ -45,7 +45,12 @@ class Settings(BaseSettings):
     APP_VERSION: str = "0.1.0"
     APP_ENV: str = Field(default="development", pattern="^(development|staging|production)$")
     DEBUG: bool = False
-    ALLOWED_ORIGINS: list[str] = ["http://localhost:4200", "http://localhost:3000"]
+    ALLOWED_ORIGINS: str = "http://localhost:4200,http://localhost:3000"
+
+    @property
+    def allowed_origins_list(self) -> list[str]:
+        """Return origins as a list, splitting on commas."""
+        return [o.strip() for o in self.ALLOWED_ORIGINS.split(",") if o.strip()]
 
     # ------------------------------------------------------------------
     # Database
