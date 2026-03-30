@@ -77,6 +77,7 @@ class Settings(BaseSettings):
     # Event-Driven Service
     # ------------------------------------------------------------------
     EVENT_SERVICE_URL: str = "http://localhost:8081"
+    EVENT_SERVICE_API_KEY: str = "nexus-events-dev-key-2026"
 
     # ------------------------------------------------------------------
     # Server
