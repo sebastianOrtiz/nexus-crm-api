@@ -17,6 +17,7 @@ from src.api.v1.routers.deals import router as deals_router
 from src.api.v1.routers.events import router as events_router
 from src.api.v1.routers.organization import router as organization_router
 from src.api.v1.routers.pipeline_stages import router as pipeline_stages_router
+from src.api.v1.routers.search import router as search_router
 from src.api.v1.routers.users import router as users_router
 
 v1_router = APIRouter(prefix="/api/v1")
@@ -31,3 +32,4 @@ v1_router.include_router(deals_router)
 v1_router.include_router(activities_router)
 v1_router.include_router(dashboard_router)
 v1_router.include_router(events_router)
+v1_router.include_router(search_router)

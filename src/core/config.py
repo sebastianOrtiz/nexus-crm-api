@@ -80,6 +80,11 @@ class Settings(BaseSettings):
     EVENT_SERVICE_API_KEY: str = "nexus-events-dev-key-2026"
 
     # ------------------------------------------------------------------
+    # Semantic Search Service
+    # ------------------------------------------------------------------
+    SEARCH_SERVICE_URL: str = "http://localhost:8082"
+
+    # ------------------------------------------------------------------
     # Server
     # ------------------------------------------------------------------
     HOST: str = "0.0.0.0"  # noqa: S104 — intentional: listens on all interfaces inside Docker
