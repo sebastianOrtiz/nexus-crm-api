@@ -80,7 +80,9 @@ async def _proxy_delete(path: str) -> dict[str, Any]:
         async with httpx.AsyncClient(timeout=TIMEOUT_SECONDS) as client:
             response = await client.delete(url)
 
-        if response.status_code == 200:
+        if response.status_code in {200, 204}:
+            if response.status_code == 204:
+                return {"detail": "Document deleted"}
             return response.json()  # type: ignore[no-any-return]
 
         if response.status_code == 404:
@@ -247,7 +249,7 @@ async def query(
         HTTPException: 503 if the search service is unreachable,
             502 on any other upstream error.
     """
-    url = _build_url("/api/v1/query")
+    url = _build_url("/api/v1/search")
     try:
         async with httpx.AsyncClient(timeout=TIMEOUT_SECONDS) as client:
             response = await client.post(url, json=body)
@@ -294,7 +296,7 @@ async def health(current_user: CurrentUser) -> dict[str, Any]:
         The parsed JSON health response, or ``{"status": "unavailable"}`` if
         the service cannot be reached.
     """
-    url = _build_url("/api/v1/health")
+    url = _build_url("/health")
     try:
         async with httpx.AsyncClient(timeout=TIMEOUT_SECONDS) as client:
             response = await client.get(url)
